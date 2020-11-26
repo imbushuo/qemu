@@ -15,6 +15,7 @@
 #include "arm-powerctl.h"
 #include "qemu/log.h"
 #include "qemu/main-loop.h"
+#include "sysemu/hw_accel.h"
 
 #ifndef DEBUG_ARM_POWERCTL
 #define DEBUG_ARM_POWERCTL 0
@@ -65,6 +66,8 @@ static void arm_set_cpu_on_async_work(CPUState *target_cpu_state,
     /* Initialize the cpu we are turning on */
     cpu_reset(target_cpu_state);
     target_cpu_state->halted = 0;
+
+    cpu_synchronize_state(target_cpu_state);
 
     if (info->target_aa64) {
         if ((info->target_el < 3) && arm_feature(&target_cpu->env,

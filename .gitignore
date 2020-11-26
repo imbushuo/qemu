@@ -10,3 +10,4 @@ TAGS
 *~
 *.ast_raw
 *.depend_raw
+.DS_Store

@@ -1,5 +1,6 @@
 softmmu_ss.add(files('accel.c'))
 
+subdir('hvf')
 subdir('qtest')
 subdir('kvm')
 subdir('tcg')

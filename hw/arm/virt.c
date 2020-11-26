@@ -45,6 +45,7 @@
 #include "hw/display/ramfb.h"
 #include "net/net.h"
 #include "sysemu/device_tree.h"
+#include "sysemu/hvf.h"
 #include "sysemu/numa.h"
 #include "sysemu/runstate.h"
 #include "sysemu/sysemu.h"
@@ -1745,6 +1746,14 @@ static void machvirt_init(MachineState *machine)
     bool has_ged = !vmc->no_ged;
     unsigned int smp_cpus = machine->smp.cpus;
     unsigned int max_cpus = machine->smp.max_cpus;
+
+    /*
+     * On Hypervisor.framework capable systems, we only have 36 bits of PA
+     * space, which is not enough to fit a 64bit BAR space
+     */
+    if (hvf_enabled()) {
+        vms->highmem = false;
+    }
 
     /*
      * In accelerated mode, the memory map is computed earlier in kvm_type()
