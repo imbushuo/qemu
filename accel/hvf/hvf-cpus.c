@@ -421,9 +421,10 @@ static void hvf_start_vcpu_thread(CPUState *cpu)
 #ifdef __aarch64__
 static void hvf_kick_vcpu_thread(CPUState *cpu)
 {
+    cpu->exit_request = 1;
+    smp_wmb();
+
     if (!qemu_cpu_is_self(cpu)) {
-        cpu->exit_request = 1;
-        smp_wmb();
         hv_vcpus_exit(&cpu->hvf_fd, 1);
     }
 }
