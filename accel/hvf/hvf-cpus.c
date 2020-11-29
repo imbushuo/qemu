@@ -285,6 +285,7 @@ static void do_hvf_cpu_synchronize_post_reset(CPUState *cpu,
                                               run_on_cpu_data arg)
 {
     hvf_put_registers(cpu);
+    hvf_arch_init_vcpu(cpu);
     cpu->vcpu_dirty = false;
 }
 
