@@ -550,6 +550,11 @@ void qemu_thread_create(QemuThread *thread, const char *name,
     /* TODO avoid SIGBUS loss on macOS */
     pthread_sigmask(SIG_SETMASK, &set, &oldset);
 
+#ifdef __APPLE__
+    /* Provide hint to macOS about scheduling */
+    pthread_attr_set_qos_class_np(&attr, QOS_CLASS_USER_INTERACTIVE, 0);
+#endif
+
     qemu_thread_args = g_new0(QemuThreadArgs, 1);
     qemu_thread_args->name = g_strdup(name);
     qemu_thread_args->start_routine = start_routine;

@@ -4,6 +4,10 @@
 #include <pthread.h>
 #include <semaphore.h>
 
+#ifdef __APPLE__
+#include <pthread/qos.h>
+#endif
+
 typedef QemuMutex QemuRecMutex;
 #define qemu_rec_mutex_destroy qemu_mutex_destroy
 #define qemu_rec_mutex_lock_impl    qemu_mutex_lock_impl
