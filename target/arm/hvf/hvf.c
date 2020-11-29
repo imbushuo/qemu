@@ -150,8 +150,13 @@ int hvf_arch_init_vcpu(CPUState *cpu)
 {
     ARMCPU *arm_cpu = ARM_CPU(cpu);
     CPUARMState *env = &arm_cpu->env;
+    hv_return_t ret;
 
     env->aarch64 = 1;
+
+    ret = hv_vcpu_set_sys_reg(cpu->hvf_fd, HV_SYS_REG_SCTLR_EL1,
+                              arm_cpu->reset_sctlr);
+    assert_hvf_ok(ret);
 
     return 0;
 }
@@ -201,6 +206,15 @@ int hvf_vcpu_exec(CPUState *cpu)
         }
 
         qemu_mutex_unlock_iothread();
+
+        // Make sure we respect exit request
+        if (cpu->exit_request) {
+            qemu_mutex_lock_iothread();
+            cpu->exit_request = 0;
+            smp_wmb();
+            return EXCP_HLT;
+        }
+
         if (cpu->cpu_index && cpu->halted) {
             qemu_mutex_lock_iothread();
             return EXCP_HLT;
