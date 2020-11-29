@@ -139,6 +139,10 @@ int hvf_put_registers(CPUState *cpu)
                               arm_cpu->mp_affinity);
     assert_hvf_ok(ret);
 
+    ret = hv_vcpu_set_sys_reg(cpu->hvf_fd, HV_SYS_REG_MIDR_EL1,
+                              arm_cpu->midr);
+    assert_hvf_ok(ret);
+
     return 0;
 }
 
@@ -156,6 +160,18 @@ int hvf_arch_init_vcpu(CPUState *cpu)
 
     ret = hv_vcpu_set_sys_reg(cpu->hvf_fd, HV_SYS_REG_SCTLR_EL1,
                               arm_cpu->reset_sctlr);
+    assert_hvf_ok(ret);
+
+    ret = hv_vcpu_set_sys_reg(cpu->hvf_fd, HV_SYS_REG_CNTV_CVAL_EL0,
+                              0);
+    assert_hvf_ok(ret);
+
+    ret = hv_vcpu_set_sys_reg(cpu->hvf_fd, HV_SYS_REG_CNTV_CTL_EL0,
+                              0);
+    assert_hvf_ok(ret);
+
+    ret = hv_vcpu_set_sys_reg(cpu->hvf_fd, HV_SYS_REG_CNTKCTL_EL1,
+                              0);
     assert_hvf_ok(ret);
 
     return 0;
