@@ -411,6 +411,8 @@ static void arm_cpu_reset(DeviceState *dev)
 #ifndef CONFIG_USER_ONLY
     if (kvm_enabled()) {
         kvm_arm_reset_vcpu(cpu);
+    } else if (hvf_enabled()) {
+        s->vcpu_dirty = true;
     }
 #endif
 

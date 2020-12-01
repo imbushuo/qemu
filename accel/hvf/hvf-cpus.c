@@ -285,7 +285,6 @@ static void do_hvf_cpu_synchronize_post_reset(CPUState *cpu,
                                               run_on_cpu_data arg)
 {
     hvf_put_registers(cpu);
-    hvf_arch_init_vcpu(cpu);
     cpu->vcpu_dirty = false;
 }
 
@@ -319,10 +318,12 @@ static void hvf_cpu_synchronize_pre_loadvm(CPUState *cpu)
 
 static void hvf_vcpu_destroy(CPUState *cpu)
 {
-    hv_return_t ret = hv_vcpu_destroy(cpu->hvf_fd);
+    hv_return_t ret = hv_vcpu_destroy(cpu->hvf->fd);
     assert_hvf_ok(ret);
 
     hvf_arch_vcpu_destroy(cpu);
+    free(cpu->hvf);
+    cpu->hvf = NULL;
 }
 
 static void dummy_signal(int sig)
@@ -332,6 +333,8 @@ static void dummy_signal(int sig)
 static int hvf_init_vcpu(CPUState *cpu)
 {
     int r;
+
+    cpu->hvf = g_malloc0(sizeof(*cpu->hvf));
 
     /* init cpu signals */
     sigset_t set;
@@ -343,11 +346,12 @@ static int hvf_init_vcpu(CPUState *cpu)
 
     pthread_sigmask(SIG_BLOCK, NULL, &set);
     sigdelset(&set, SIG_IPI);
+    pthread_sigmask(SIG_SETMASK, &set, NULL);
 
 #ifdef __aarch64__
-    r = hv_vcpu_create(&cpu->hvf_fd, (hv_vcpu_exit_t **)&cpu->hvf_exit, NULL);
+    r = hv_vcpu_create(&cpu->hvf->fd, (hv_vcpu_exit_t **)&cpu->hvf->exit, NULL);
 #else
-    r = hv_vcpu_create((hv_vcpuid_t *)&cpu->hvf_fd, HV_VCPU_DEFAULT);
+    r = hv_vcpu_create((hv_vcpuid_t *)&cpu->hvf->fd, HV_VCPU_DEFAULT);
 #endif
     cpu->vcpu_dirty = 1;
     assert_hvf_ok(r);
@@ -419,23 +423,14 @@ static void hvf_start_vcpu_thread(CPUState *cpu)
                        cpu, QEMU_THREAD_JOINABLE);
 }
 
-#ifdef __aarch64__
-static void hvf_kick_vcpu_thread(CPUState *cpu)
+__attribute__((weak)) void hvf_kick_vcpu_thread(CPUState *cpu)
 {
-    cpu->exit_request = 1;
-    smp_wmb();
-
-    if (!qemu_cpu_is_self(cpu)) {
-        hv_vcpus_exit(&cpu->hvf_fd, 1);
-    }
+    cpus_kick_thread(cpu);
 }
-#endif
 
 static const CpusAccel hvf_cpus = {
     .create_vcpu_thread = hvf_start_vcpu_thread,
-#ifdef __aarch64__
     .kick_vcpu_thread = hvf_kick_vcpu_thread,
-#endif
 
     .synchronize_post_reset = hvf_cpu_synchronize_post_reset,
     .synchronize_post_init = hvf_cpu_synchronize_post_init,

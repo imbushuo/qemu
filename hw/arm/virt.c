@@ -86,13 +86,13 @@
     { \
         MachineClass *mc = MACHINE_CLASS(oc); \
         virt_machine_##major##_##minor##_options(mc); \
-        mc->desc = "QEMU " # major "." # minor " ARM Virtual Machine"; \
+        mc->desc = "QEMU " # major "." # minor " ARM Virtual Machine on Apple Silicon"; \
         if (latest) { \
             mc->alias = "virt"; \
         } \
     } \
     static const TypeInfo machvirt_##major##_##minor##_info = { \
-        .name = MACHINE_TYPE_NAME("virt-" # major "." # minor), \
+        .name = MACHINE_TYPE_NAME("Apple M1 (virt-" # major "." # minor ")"), \
         .parent = TYPE_VIRT_MACHINE, \
         .class_init = virt_##major##_##minor##_class_init, \
     }; \
@@ -1438,6 +1438,10 @@ static void virt_build_smbios(VirtMachineState *vms)
 
     if (kvm_enabled()) {
         product = "KVM Virtual Machine";
+    }
+
+    if (hvf_enabled()) {
+        product = "Apple Virtual Machine";
     }
 
     smbios_set_defaults("QEMU", product,

@@ -280,6 +280,7 @@ struct KVMState;
 struct kvm_run;
 
 struct hax_vcpu_state;
+struct hvf_vcpu_state;
 
 #define TB_JMP_CACHE_BITS 12
 #define TB_JMP_CACHE_SIZE (1 << TB_JMP_CACHE_BITS)
@@ -463,7 +464,7 @@ struct CPUState {
 
     struct hax_vcpu_state *hax_vcpu;
 
-    uint64_t hvf_fd;
+    struct hvf_vcpu_state *hvf;
     void *hvf_exit;
 
     /* track IOMMUs whose translations we've cached in the TCG TLB */
