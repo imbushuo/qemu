@@ -573,8 +573,18 @@ int hvf_vcpu_exec(CPUState *cpu)
             } else {
                 DPRINTF("unknown SMC! %016llx", env->xregs[0]);
                 env->xregs[0] = -1;
-                env->pc += 4;
             }
+            /* 
+             * Unlike HVC that automatically advances ELR_EL2 to the next 
+             * instruction upon exception entry, trapped SMC has a different 
+             * preferred return path, so ELR_EL2 should be advanced by 4
+             * anyway.
+             * 
+             * Apple Silicon does not implement EL3 yet, so SMC trap behavior
+             * is implementation defined according to the spec.
+             * But at least this works on M1.
+             */
+            env->pc += 4;
             qemu_mutex_unlock_iothread();
             break;
         default:
