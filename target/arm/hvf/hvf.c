@@ -574,12 +574,12 @@ int hvf_vcpu_exec(CPUState *cpu)
                 DPRINTF("unknown SMC! %016llx", env->xregs[0]);
                 env->xregs[0] = -1;
             }
-            /* 
-             * Unlike HVC that automatically advances ELR_EL2 to the next 
-             * instruction upon exception entry, trapped SMC has a different 
+            /*
+             * Unlike HVC that automatically advances ELR_EL2 to the next
+             * instruction upon exception entry, trapped SMC has a different
              * preferred return path, so ELR_EL2 should be advanced by 4
              * anyway.
-             * 
+             *
              * Apple Silicon does not implement EL3 yet, so SMC trap behavior
              * is implementation defined according to the spec.
              * But at least this works on M1.
