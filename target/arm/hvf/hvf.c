@@ -37,9 +37,37 @@
 
 #define SYSREG(op0, op1, op2, crn, crm) \
     ((op0 << 20) | (op2 << 17) | (op1 << 14) | (crn << 10) | (crm << 1))
+
 #define SYSREG_MASK           SYSREG(0x3, 0x7, 0x7, 0xf, 0xf)
 #define SYSREG_CNTPCT_EL0     SYSREG(3, 3, 1, 14, 0)
 #define SYSREG_PMCCNTR_EL0    SYSREG(3, 3, 0, 9, 13)
+
+#define SYSREG_ICC_AP0R0_EL1     SYSREG(3, 0, 4, 12, 8)
+#define SYSREG_ICC_AP0R1_EL1     SYSREG(3, 0, 5, 12, 8)
+#define SYSREG_ICC_AP0R2_EL1     SYSREG(3, 0, 6, 12, 8)
+#define SYSREG_ICC_AP0R3_EL1     SYSREG(3, 0, 7, 12, 8)
+#define SYSREG_ICC_AP1R0_EL1     SYSREG(3, 0, 0, 12, 9)
+#define SYSREG_ICC_AP1R1_EL1     SYSREG(3, 0, 1, 12, 9)
+#define SYSREG_ICC_AP1R2_EL1     SYSREG(3, 0, 2, 12, 9)
+#define SYSREG_ICC_AP1R3_EL1     SYSREG(3, 0, 3, 12, 9)
+#define SYSREG_ICC_ASGI1R_EL1    SYSREG(3, 0, 6, 12, 11)
+#define SYSREG_ICC_BPR0_EL1      SYSREG(3, 0, 3, 12, 8)
+#define SYSREG_ICC_BPR1_EL1      SYSREG(3, 0, 3, 12, 12)
+#define SYSREG_ICC_CTLR_EL1      SYSREG(3, 0, 4, 12, 12)
+#define SYSREG_ICC_DIR_EL1       SYSREG(3, 0, 1, 12, 11)
+#define SYSREG_ICC_EOIR0_EL1     SYSREG(3, 0, 1, 12, 8)
+#define SYSREG_ICC_EOIR1_EL1     SYSREG(3, 0, 1, 12, 12)
+#define SYSREG_ICC_HPPIR0_EL1    SYSREG(3, 0, 2, 12, 8)
+#define SYSREG_ICC_HPPIR1_EL1    SYSREG(3, 0, 2, 12, 12)
+#define SYSREG_ICC_IAR0_EL1      SYSREG(3, 0, 0, 12, 8)
+#define SYSREG_ICC_IAR1_EL1      SYSREG(3, 0, 0, 12, 12)
+#define SYSREG_ICC_IGRPEN0_EL1   SYSREG(3, 0, 6, 12, 12)
+#define SYSREG_ICC_IGRPEN1_EL1   SYSREG(3, 0, 7, 12, 12)
+#define SYSREG_ICC_PMR_EL1       SYSREG(3, 0, 0, 4, 6)
+#define SYSREG_ICC_RPR_EL1       SYSREG(3, 0, 3, 12, 11)
+#define SYSREG_ICC_SGI0R_EL1     SYSREG(3, 0, 7, 12, 11)
+#define SYSREG_ICC_SGI1R_EL1     SYSREG(3, 0, 5, 12, 11)
+#define SYSREG_ICC_SRE_EL1       SYSREG(3, 0, 5, 12, 12)
 
 #define WFX_IS_WFE (1 << 0)
 
@@ -422,7 +450,16 @@ int hvf_vcpu_exec(CPUState *cpu)
                     hvf_exit->exception.physical_address, isv, iswrite,
                     s1ptw, len, srt);
 
-            assert(isv);
+#ifdef HVF_ASSERT_ON_EMPTY_ISV
+            /*
+             * Is this really needed?
+             *
+             * ARM architecture reference manual says that this bit may be
+             * read-as-set-zero in all faults from ESR_EL2 except for certain
+             * stores and loads (excluding those with atomics and writebacks).
+             */
+             assert(isv);
+#endif
 
             if (iswrite) {
                 val = hvf_get_reg(cpu, srt);
@@ -452,10 +489,18 @@ int hvf_vcpu_exec(CPUState *cpu)
             break;
         }
         case EC_SYSTEMREGISTERTRAP: {
-            bool isread = (syndrome >> 21) & 1;
+            bool isread = (syndrome >> 0) & 1;
+            const ARMCPRegInfo *ri;
+
             uint32_t rt = (syndrome >> 5) & 0x1f;
             uint32_t reg = syndrome & SYSREG_MASK;
             uint64_t val = 0;
+
+            DPRINTF("sysreg %s operation reg=%08x (op0=%d op1=%d op2=%d "
+                    "crn=%d crm=%d)", (isread) ? "read" : "write",
+                    reg, (reg >> 20) & 0x3,
+                    (reg >> 14) & 0x7, (reg >> 17) & 0x7,
+                    (reg >> 10) & 0xf, (reg >> 1) & 0xf);
 
             if (isread) {
                 switch (reg) {
@@ -464,7 +509,52 @@ int hvf_vcpu_exec(CPUState *cpu)
                           gt_cntfrq_period_ns(arm_cpu);
                     break;
                 case SYSREG_PMCCNTR_EL0:
-                    val = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+                    val = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) * 3.21;
+                    break;
+                case SYSREG_ICC_AP0R0_EL1:
+                case SYSREG_ICC_AP0R1_EL1:
+                case SYSREG_ICC_AP0R2_EL1:
+                case SYSREG_ICC_AP0R3_EL1:
+                case SYSREG_ICC_AP1R0_EL1:
+                case SYSREG_ICC_AP1R1_EL1:
+                case SYSREG_ICC_AP1R2_EL1:
+                case SYSREG_ICC_AP1R3_EL1:
+                case SYSREG_ICC_ASGI1R_EL1:
+                case SYSREG_ICC_BPR0_EL1:
+                case SYSREG_ICC_BPR1_EL1:
+                case SYSREG_ICC_CTLR_EL1:
+                case SYSREG_ICC_DIR_EL1:
+                case SYSREG_ICC_EOIR0_EL1:
+                case SYSREG_ICC_EOIR1_EL1:
+                case SYSREG_ICC_HPPIR0_EL1:
+                case SYSREG_ICC_HPPIR1_EL1:
+                case SYSREG_ICC_IAR0_EL1:
+                case SYSREG_ICC_IAR1_EL1:
+                case SYSREG_ICC_IGRPEN0_EL1:
+                case SYSREG_ICC_IGRPEN1_EL1:
+                case SYSREG_ICC_PMR_EL1:
+                case SYSREG_ICC_SGI0R_EL1:
+                case SYSREG_ICC_SGI1R_EL1:
+                case SYSREG_ICC_SRE_EL1:
+                    ri = get_arm_cp_reginfo(arm_cpu->cp_regs,
+                                            ENCODE_AA64_CP_REG(CP_REG_ARM64_SYSREG_CP,
+                                                               (reg >> 10) & 0xf,
+                                                               (reg >> 1) & 0xf,
+                                                               (reg >> 20) & 0x3,
+                                                               (reg >> 14) & 0x7,
+                                                               (reg >> 17) & 0x7));
+                    if (ri) {
+                        qemu_mutex_lock_iothread();
+                        if (ri->type & ARM_CP_CONST) {
+                            val = ri->resetvalue;
+                        } else if (ri->readfn) {
+                            val = ri->readfn(env, ri);
+                        } else {
+                            val = CPREG_FIELD64(env, ri);
+                        }
+                        qemu_mutex_unlock_iothread();
+                        DPRINTF("vgic read from %s [val=%016llx]", ri->name, val);
+                    }
                     break;
                 default:
                     DPRINTF("unhandled sysreg read %08x (op0=%d op1=%d op2=%d "
@@ -480,6 +570,62 @@ int hvf_vcpu_exec(CPUState *cpu)
 
                 switch (reg) {
                 case SYSREG_CNTPCT_EL0:
+                    break;
+                case SYSREG_ICC_AP0R0_EL1:
+                case SYSREG_ICC_AP0R1_EL1:
+                case SYSREG_ICC_AP0R2_EL1:
+                case SYSREG_ICC_AP0R3_EL1:
+                case SYSREG_ICC_AP1R0_EL1:
+                case SYSREG_ICC_AP1R1_EL1:
+                case SYSREG_ICC_AP1R2_EL1:
+                case SYSREG_ICC_AP1R3_EL1:
+                case SYSREG_ICC_ASGI1R_EL1:
+                case SYSREG_ICC_BPR0_EL1:
+                case SYSREG_ICC_BPR1_EL1:
+                case SYSREG_ICC_CTLR_EL1:
+                case SYSREG_ICC_DIR_EL1:
+                case SYSREG_ICC_EOIR0_EL1:
+                case SYSREG_ICC_EOIR1_EL1:
+                case SYSREG_ICC_HPPIR0_EL1:
+                case SYSREG_ICC_HPPIR1_EL1:
+                case SYSREG_ICC_IAR0_EL1:
+                case SYSREG_ICC_IAR1_EL1:
+                case SYSREG_ICC_IGRPEN0_EL1:
+                case SYSREG_ICC_IGRPEN1_EL1:
+                case SYSREG_ICC_PMR_EL1:
+                case SYSREG_ICC_SGI0R_EL1:
+                case SYSREG_ICC_SGI1R_EL1:
+                case SYSREG_ICC_SRE_EL1:
+                    ri = get_arm_cp_reginfo(arm_cpu->cp_regs,
+                                            ENCODE_AA64_CP_REG(CP_REG_ARM64_SYSREG_CP,
+                                                               (reg >> 10) & 0xf,
+                                                               (reg >> 1) & 0xf,
+                                                               (reg >> 20) & 0x3,
+                                                               (reg >> 14) & 0x7,
+                                                               (reg >> 17) & 0x7));
+
+                    if (ri) {
+                        qemu_mutex_lock_iothread();
+                        if (ri->writefn) {
+                            ri->writefn(env, ri, val);
+                        } else {
+                            CPREG_FIELD64(env, ri) = val;
+                        }
+
+                        /*
+                         * We do not have a callback to see if the timer is out of
+                         * pending state. That means every MMIO write could
+                         * potentially be an EOI ends the vtimer. Until we get an
+                         * actual callback, let's just see if the timer is still
+                         * pending on every possible toggle point. This is the
+                         * same case as above in the data abort handler.
+                         */
+                        qemu_set_irq(arm_cpu->gt_timer_outputs[GTIMER_VIRT], 0);
+                        hv_vcpu_set_vtimer_mask(cpu->hvf->fd, false);
+
+                        qemu_mutex_unlock_iothread();
+                        DPRINTF("vgic write to %s [val=%016llx]", ri->name, val);
+                    }
                     break;
                 default:
                     DPRINTF("unhandled sysreg write %08x", reg);
