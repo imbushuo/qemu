@@ -40,6 +40,7 @@
 #include "hw/usb/hcd-xhci-pci.h"
 #include "hw/virtio/virtio-pci.h"
 #include "hw/vmapple/vmapple.h"
+#include "hw/arm/machines-qom.h"
 #include "net/net.h"
 #include "qapi/error.h"
 #include "qapi/visitor.h"
@@ -575,6 +576,8 @@ static void vmapple_machine_class_init(ObjectClass *oc, const void *data)
 {
     MachineClass *mc = MACHINE_CLASS(oc);
 
+    error_report("Init Apple machine class");
+
     mc->init = mach_vmapple_init;
     mc->max_cpus = 32;
     mc->block_default_type = IF_VIRTIO;
@@ -609,10 +612,12 @@ static const TypeInfo vmapple_machine_info = {
     .instance_size = sizeof(VMAppleMachineState),
     .class_init    = vmapple_machine_class_init,
     .instance_init = vmapple_instance_init,
+    .interfaces    = aarch64_machine_interfaces,
 };
 
 static void machvmapple_machine_init(void)
 {
+    error_report("Registering Apple machine");
     type_register_static(&vmapple_machine_info);
 }
 type_init(machvmapple_machine_init);
