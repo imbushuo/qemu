@@ -15,7 +15,7 @@ config VMAPPLE_VIRTIO_BLK
 config VMAPPLE
     bool
     depends on ARM
-    depends on HVF
+    depends on HVF || WHPX
     default y if ARM
     imply PCI_DEVICES
     select ARM_GICV3
@@ -30,5 +30,5 @@ config VMAPPLE
     select VMAPPLE_AES
     select VMAPPLE_BDIF
     select VMAPPLE_CFG
-    select MAC_PVG_MMIO
+#    select MAC_PVG_MMIO
     select VMAPPLE_VIRTIO_BLK

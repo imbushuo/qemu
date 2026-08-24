@@ -82,6 +82,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(AESState, APPLE_AES)
 #define REG_FLAG_INFO         0x30
 #define REG_FIFO              0x200
 
+#define STATIC_MAX_LEN 0x1000
+
 static const uint32_t key_lens[CMD_KEY_KEY_LEN_NUM] = {
     [0] = 16,
     [1] = 24,
@@ -253,8 +255,8 @@ static bool cmd_iv(AESState *s)
 
 static void dump_data(const char *desc, const void *p, size_t len)
 {
-    static const size_t MAX_LEN = 0x1000;
-    char hex[MAX_LEN * 2 + 1] = "";
+    static const size_t MAX_LEN = STATIC_MAX_LEN;
+    char hex[STATIC_MAX_LEN * 2 + 1] = "";
 
     if (len > MAX_LEN) {
         return;

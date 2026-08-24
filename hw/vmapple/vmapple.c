@@ -206,6 +206,7 @@ static bool create_cfg(VMAppleMachineState *vms, MemoryRegion *mem,
 
 static void create_gfx(VMAppleMachineState *vms, MemoryRegion *mem)
 {
+#ifdef __MAC_OS_X_VERSION_MAX_ALLOWED
     int irq_gfx = vms->irqmap[VMAPPLE_APV_GFX];
     int irq_iosfc = vms->irqmap[VMAPPLE_APV_IOSFC];
     SysBusDevice *gfx;
@@ -216,6 +217,7 @@ static void create_gfx(VMAppleMachineState *vms, MemoryRegion *mem)
     sysbus_connect_irq(gfx, 0, qdev_get_gpio_in(vms->gic, irq_gfx));
     sysbus_connect_irq(gfx, 1, qdev_get_gpio_in(vms->gic, irq_iosfc));
     sysbus_realize_and_unref(gfx, &error_fatal);
+#endif
 }
 
 static void create_aes(VMAppleMachineState *vms, MemoryRegion *mem)

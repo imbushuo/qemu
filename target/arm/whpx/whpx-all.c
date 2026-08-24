@@ -922,8 +922,8 @@ int whpx_accel_init(AccelState *as, MachineState *ms)
     WHV_ARM64_IC_PARAMETERS ic_params = {
         .EmulationMode = WHvArm64IcEmulationModeGicV3,
         .GicV3Parameters = {
-            .GicdBaseAddress = 0x08000000,
-            .GitsTranslaterBaseAddress = 0x08080000,
+            .GicdBaseAddress = 0x10000000,
+            .GitsTranslaterBaseAddress = 0,
             .GicLpiIntIdBits = 0,
             .GicPpiPerformanceMonitorsInterrupt = VIRTUAL_PMU_IRQ,
             .GicPpiOverflowInterruptFromCntv = ARCH_TIMER_VIRT_IRQ
