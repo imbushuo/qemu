@@ -1,2 +1,4 @@
 whpx_unknown_hvc(uint64_t pc, uint64_t x0) "pc=0x%"PRIx64" unknown HVC! 0x%016"PRIx64
 whpx_unknown_smc(uint64_t x0) "unknown SMC! 0x%016"PRIx64
+whpx_vmexit(uint32_t reason, uint64_t ec) "VmExit Reason cpuid=0x%x 0x%016"PRIx64
+whpx_psci_call(uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3, uint32_t cpuid) "PSCI Call x0=0x%016"PRIx64" x1=0x%016"PRIx64" x2=0x%016"PRIx64" x3=0x%016"PRIx64" cpuid=0x%x"

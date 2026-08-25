@@ -446,12 +446,11 @@ int whpx_vcpu_run(CPUState *cpu)
             break;
         }
 
-        error_report("WHPX: vCPU Exit, Reason 0x%x", vcpu->exit_ctx.ExitReason);
-
         switch (vcpu->exit_ctx.ExitReason) {
         case WHvRunVpExitReasonGpaIntercept:
         case WHvRunVpExitReasonUnmappedGpa:
             ec = syn_get_ec(vcpu->exit_ctx.MemoryAccess.Syndrome);
+            trace_whpx_vmexit(vcpu->exit_ctx.ExitReason, ec);
             assert(ec == EC_DATAABORT);
             advance_pc = true;
 
@@ -495,10 +494,12 @@ int whpx_vcpu_run(CPUState *cpu)
             ret = whpx_handle_mmio(cpu, &vcpu->exit_ctx.MemoryAccess);
             break;
         case WHvRunVpExitReasonCanceled:
+            trace_whpx_vmexit(vcpu->exit_ctx.ExitReason, 0);
             cpu->exception_index = EXCP_INTERRUPT;
             ret = 1;
             break;
         case WHvRunVpExitReasonArm64Reset:
+            trace_whpx_vmexit(vcpu->exit_ctx.ExitReason, 0);
             switch (vcpu->exit_ctx.Arm64Reset.ResetType) {
             case WHvArm64ResetTypePowerOff:
                 qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
@@ -522,6 +523,7 @@ int whpx_vcpu_run(CPUState *cpu)
         case WHvRunVpExitReasonInvalidVpRegisterValue:
         case WHvRunVpExitReasonUnsupportedFeature:
         default:
+            trace_whpx_vmexit(vcpu->exit_ctx.ExitReason, 0);
             error_report("WHPX: Unexpected VP exit code 0x%08x",
                          vcpu->exit_ctx.ExitReason);
             whpx_get_registers(cpu, WHPX_LEVEL_FULL_STATE);
