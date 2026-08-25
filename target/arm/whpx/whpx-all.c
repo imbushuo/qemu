@@ -42,6 +42,7 @@
 #include "arm-powerctl.h"
 
 #include "trace.h"
+#include "target/arm/trace.h"
 
 #include <winhvplatform.h>
 #include <winhvplatformdefs.h>
@@ -395,7 +396,19 @@ static void whpx_psci_cpu_off(ARMCPU *arm_cpu)
 
 static bool whpx_handle_psci_call(CPUState *cpu, WHV_RUN_VP_EXIT_CONTEXT *ctx)
 {
-    // TODO
+    ARMCPU *arm_cpu = ARM_CPU(cpu);
+    CPUARMState *env = &arm_cpu->env;
+    uint64_t param[4] = {
+        env->xregs[0],
+        env->xregs[1],
+        env->xregs[2],
+        env->xregs[3]
+    };
+    WHV_REGISTER_VALUE pcVal;
+
+    whpx_get_reg(cpu, WHvArm64RegisterPc, &pcVal);
+    trace_whpx_psci_call(pcVal.Reg64, param[0], param[1], param[2], param[3], arm_cpu_mp_affinity(arm_cpu));
+
     return true;
 }
 
@@ -405,8 +418,9 @@ int whpx_vcpu_run(CPUState *cpu)
     struct whpx_state *whpx = &whpx_global;
     ARMCPU *arm_cpu = ARM_CPU(cpu);
     AccelCPUState *vcpu = cpu->accel;
+    CPUARMState *env = &arm_cpu->env;
     int ret;
-
+    WHV_REGISTER_VALUE pcVal;
 
     g_assert(bql_locked());
 
@@ -450,15 +464,15 @@ int whpx_vcpu_run(CPUState *cpu)
         case WHvRunVpExitReasonGpaIntercept:
         case WHvRunVpExitReasonUnmappedGpa:
             ec = syn_get_ec(vcpu->exit_ctx.MemoryAccess.Syndrome);
-            trace_whpx_vmexit(vcpu->exit_ctx.ExitReason, ec);
+            whpx_get_reg(cpu, WHvArm64RegisterPc, &pcVal);
+            trace_whpx_vmexit_gpa(vcpu->exit_ctx.MemoryAccess.Syndrome, ec, pcVal.Reg64, env->xregs[0], env->xregs[1], env->xregs[2], env->xregs[3], arm_cpu_mp_affinity(arm_cpu));
             assert(ec == EC_DATAABORT);
             advance_pc = true;
-
-            error_report("WHPX: vCPU EC: %d", ec);
             if (ec == EC_AA64_HVC || ec == 36) {
                 // TODO: Handle PSCI without advancing PC
                 advance_pc = false;
                 cpu_synchronize_state(cpu);
+                whpx_get_registers(cpu, WHPX_LEVEL_FULL_STATE);
                 ret = whpx_handle_psci_call(cpu, &vcpu->exit_ctx);
                 if (!ret) {
                     whpx_get_reg(cpu, WHvArm64RegisterX0, &reg);
@@ -471,6 +485,7 @@ int whpx_vcpu_run(CPUState *cpu)
             } else if (ec == EC_AA64_SMC) {
                 // TODO: Handle PSCI
                 cpu_synchronize_state(cpu);
+                whpx_get_registers(cpu, WHPX_LEVEL_FULL_STATE);
                 ret = whpx_handle_psci_call(cpu, &vcpu->exit_ctx);
                 if (!ret) {
                     whpx_get_reg(cpu, WHvArm64RegisterX0, &reg);
