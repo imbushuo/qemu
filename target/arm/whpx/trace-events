@@ -1,0 +1,2 @@
+whpx_unknown_hvc(uint64_t pc, uint64_t x0) "pc=0x%"PRIx64" unknown HVC! 0x%016"PRIx64
+whpx_unknown_smc(uint64_t x0) "unknown SMC! 0x%016"PRIx64

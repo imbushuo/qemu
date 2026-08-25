@@ -35,9 +35,13 @@
 #include "system/whpx-accel-ops.h"
 #include "system/whpx-all.h"
 #include "system/whpx-common.h"
+#include "system/cpus.h"
+#include "system/hw_accel.h"
 #include "whpx_arm.h"
 #include "hw/arm/bsa.h"
 #include "arm-powerctl.h"
+
+#include "trace.h"
 
 #include <winhvplatform.h>
 #include <winhvplatformdefs.h>
@@ -389,6 +393,12 @@ static void whpx_psci_cpu_off(ARMCPU *arm_cpu)
     assert(ret == QEMU_ARM_POWERCTL_RET_SUCCESS);
 }
 
+static bool whpx_handle_psci_call(CPUState *cpu, WHV_RUN_VP_EXIT_CONTEXT *ctx)
+{
+    // TODO
+    return true;
+}
+
 int whpx_vcpu_run(CPUState *cpu)
 {
     HRESULT hr;
@@ -414,7 +424,7 @@ int whpx_vcpu_run(CPUState *cpu)
     do {
         bool advance_pc = false;
         uint32_t ec = 0;
-        uint64_t reg = 0;
+        WHV_REGISTER_VALUE reg;
 
         if (cpu->vcpu_dirty) {
             whpx_set_registers(cpu, WHPX_LEVEL_RUNTIME_STATE);
@@ -452,11 +462,11 @@ int whpx_vcpu_run(CPUState *cpu)
                 cpu_synchronize_state(cpu);
                 ret = whpx_handle_psci_call(cpu, &vcpu->exit_ctx);
                 if (!ret) {
-                    whpx_get_reg(cpu, WhvArm64RegisterX0, &reg);
-                    trace_whpx_unknown_hvc(vcpu->exit_ctx.MemoryAccess.Header.Pc, reg);
+                    whpx_get_reg(cpu, WHvArm64RegisterX0, &reg);
+                    trace_whpx_unknown_hvc(vcpu->exit_ctx.MemoryAccess.Header.Pc, reg.Reg64);
                     /* SMCCC 1.3 section 5.2 says every unknown SMCCC call returns -1 */
-                    reg = (uint64_t) -1;
-                    whpx_set_reg(cpu, WhvArm64RegisterX0, reg);
+                    reg.Reg64 = (uint64_t) -1;
+                    whpx_set_reg(cpu, WHvArm64RegisterX0, reg);
                 }
                 break;
             } else if (ec == EC_AA64_SMC) {
@@ -464,11 +474,11 @@ int whpx_vcpu_run(CPUState *cpu)
                 cpu_synchronize_state(cpu);
                 ret = whpx_handle_psci_call(cpu, &vcpu->exit_ctx);
                 if (!ret) {
-                    whpx_get_reg(cpu, WhvArm64RegisterX0, &reg);
-                    trace_whpx_unknown_hvc(vcpu->exit_ctx.MemoryAccess.Header.Pc, reg);
+                    whpx_get_reg(cpu, WHvArm64RegisterX0, &reg);
+                    trace_whpx_unknown_hvc(vcpu->exit_ctx.MemoryAccess.Header.Pc, reg.Reg64);
                     /* SMCCC 1.3 section 5.2 says every unknown SMCCC call returns -1 */
-                    reg = (uint64_t) -1;
-                    whpx_set_reg(cpu, WhvArm64RegisterX0, reg);
+                    reg.Reg64 = (uint64_t) -1;
+                    whpx_set_reg(cpu, WHvArm64RegisterX0, reg);
                 }
                 break;
             }
