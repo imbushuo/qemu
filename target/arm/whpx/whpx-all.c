@@ -28,6 +28,7 @@
 
 #include "syndrome.h"
 #include "target/arm/cpregs.h"
+#include "target/arm/cpu.h"
 #include "internals.h"
 
 #include "system/whpx-internal.h"
@@ -412,6 +413,9 @@ int whpx_vcpu_run(CPUState *cpu)
     cpu_exec_start(cpu);
     do {
         bool advance_pc = false;
+        uint32_t ec = 0;
+        uint64_t reg = 0;
+
         if (cpu->vcpu_dirty) {
             whpx_set_registers(cpu, WHPX_LEVEL_RUNTIME_STATE);
             cpu->vcpu_dirty = false;
@@ -432,11 +436,42 @@ int whpx_vcpu_run(CPUState *cpu)
             break;
         }
 
+        error_report("WHPX: vCPU Exit, Reason 0x%x", vcpu->exit_ctx.ExitReason);
+
         switch (vcpu->exit_ctx.ExitReason) {
         case WHvRunVpExitReasonGpaIntercept:
         case WHvRunVpExitReasonUnmappedGpa:
-            assert(syn_get_ec(vcpu->exit_ctx.MemoryAccess.Syndrome) == EC_DATAABORT);
+            ec = syn_get_ec(vcpu->exit_ctx.MemoryAccess.Syndrome);
+            assert(ec == EC_DATAABORT);
             advance_pc = true;
+
+            error_report("WHPX: vCPU EC: %d", ec);
+            if (ec == EC_AA64_HVC || ec == 36) {
+                // TODO: Handle PSCI without advancing PC
+                advance_pc = false;
+                cpu_synchronize_state(cpu);
+                ret = whpx_handle_psci_call(cpu, &vcpu->exit_ctx);
+                if (!ret) {
+                    whpx_get_reg(cpu, WhvArm64RegisterX0, &reg);
+                    trace_whpx_unknown_hvc(vcpu->exit_ctx.MemoryAccess.Header.Pc, reg);
+                    /* SMCCC 1.3 section 5.2 says every unknown SMCCC call returns -1 */
+                    reg = (uint64_t) -1;
+                    whpx_set_reg(cpu, WhvArm64RegisterX0, reg);
+                }
+                break;
+            } else if (ec == EC_AA64_SMC) {
+                // TODO: Handle PSCI
+                cpu_synchronize_state(cpu);
+                ret = whpx_handle_psci_call(cpu, &vcpu->exit_ctx);
+                if (!ret) {
+                    whpx_get_reg(cpu, WhvArm64RegisterX0, &reg);
+                    trace_whpx_unknown_hvc(vcpu->exit_ctx.MemoryAccess.Header.Pc, reg);
+                    /* SMCCC 1.3 section 5.2 says every unknown SMCCC call returns -1 */
+                    reg = (uint64_t) -1;
+                    whpx_set_reg(cpu, WhvArm64RegisterX0, reg);
+                }
+                break;
+            }
 
             if (vcpu->exit_ctx.MemoryAccess.Syndrome & BIT(8)) {
                 error_report("WHPX: cached access to unmapped memory"
@@ -963,6 +998,7 @@ int whpx_accel_init(AccelState *as, MachineState *ms)
     synthetic_features.Bank0.AccessVpRegs = 1;
     synthetic_features.Bank0.SyncContext = 1;
 
+#ifdef ENABLE_ENLIGHTMENTS
     /*
      * On ARM64, have enlightenments off by default
      * as they're not needed for performance.
@@ -980,6 +1016,7 @@ int whpx_accel_init(AccelState *as, MachineState *ms)
             goto error;
         }
     }
+#endif
 
     hr = whp_dispatch.WHvSetupPartition(whpx->partition);
     if (FAILED(hr)) {

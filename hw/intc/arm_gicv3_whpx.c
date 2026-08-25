@@ -188,7 +188,7 @@ static void whpx_gicv3_realize(DeviceState *dev, Error **errp)
     for (i = 0; i < s->num_cpu; i++) {
         CPUState *cpu_state = qemu_get_cpu(i);
         ARMCPU *cpu = ARM_CPU(cpu_state);
-        WHV_REGISTER_VALUE val = {.Reg64 = 0x080A0000 + (GICV3_REDIST_SIZE * i)};
+        WHV_REGISTER_VALUE val = {.Reg64 = 0x10010000 + (GICV3_REDIST_SIZE * i)};
         whpx_set_reg(cpu_state, WHvArm64RegisterGicrBaseGpa, val);
         define_arm_cp_regs(cpu, gicv3_cpuif_reginfo);
     }
