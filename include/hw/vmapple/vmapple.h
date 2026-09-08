@@ -20,4 +20,6 @@
 
 #define TYPE_VMAPPLE_VIRTIO_BLK_PCI "vmapple-virtio-blk-pci"
 
+bool vmapple_read_current_xreg(unsigned int index, uint64_t *value);
+
 #endif /* HW_VMAPPLE_VMAPPLE_H */

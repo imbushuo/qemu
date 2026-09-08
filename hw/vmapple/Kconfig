@@ -14,9 +14,9 @@ config VMAPPLE_VIRTIO_BLK
 
 config VMAPPLE
     bool
-    depends on ARM
-    depends on HVF
-    default y if ARM
+    depends on AARCH64
+    depends on TCG || HVF || KVM
+    default y
     imply PCI_DEVICES
     select ARM_GICV3
     select PLATFORM_BUS
@@ -30,6 +30,6 @@ config VMAPPLE
     select VMAPPLE_AES
     select VMAPPLE_BDIF
     select VMAPPLE_CFG
-    select MAC_PVG_MMIO
+    imply MAC_PVG_MMIO
     select REIMS_VGPU
     select VMAPPLE_VIRTIO_BLK

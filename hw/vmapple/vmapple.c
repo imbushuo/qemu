@@ -31,6 +31,7 @@
 #include "hw/core/qdev-properties.h"
 #include "hw/core/sysbus.h"
 #include "hw/usb/usb.h"
+#include "hw/arm/bsa.h"
 #include "hw/arm/boot.h"
 #include "hw/arm/machines-qom.h"
 #include "hw/char/pl011.h"
@@ -48,11 +49,14 @@
 #include "qobject/qlist.h"
 #include "standard-headers/linux/input.h"
 #include "system/hvf.h"
+#include "system/hw_accel.h"
+#include "system/kvm.h"
 #include "system/reset.h"
 #include "system/runstate.h"
 #include "system/system.h"
 #include "target/arm/gtimer.h"
 #include "target/arm/cpu.h"
+#include "kvm_arm.h"
 
 struct VMAppleMachineState {
     MachineState parent;
@@ -74,6 +78,19 @@ struct VMAppleMachineState {
 
 #define TYPE_VMAPPLE_MACHINE   MACHINE_TYPE_NAME("vmapple")
 OBJECT_DECLARE_SIMPLE_TYPE(VMAppleMachineState, VMAPPLE_MACHINE)
+
+bool vmapple_read_current_xreg(unsigned int index, uint64_t *value)
+{
+    CPUState *cs = current_cpu;
+
+    if (!cs || !value || index >= ARRAY_SIZE(ARM_CPU(cs)->env.xregs)) {
+        return false;
+    }
+
+    cpu_synchronize_state(cs);
+    *value = ARM_CPU(cs)->env.xregs[index];
+    return true;
+}
 
 /* Number of external interrupt lines to configure the GIC with */
 #define NUM_IRQS 256
@@ -286,11 +303,33 @@ static void create_gic(VMAppleMachineState *vms, MemoryRegion *mem)
      */
     for (i = 0; i < smp_cpus; i++) {
         DeviceState *cpudev = DEVICE(qemu_get_cpu(i));
+        const int timer_irq[] = {
+            [GTIMER_PHYS] = ARCH_TIMER_NS_EL1_IRQ,
+            [GTIMER_VIRT] = ARCH_TIMER_VIRT_IRQ,
+            [GTIMER_HYP]  = ARCH_TIMER_NS_EL2_IRQ,
+            [GTIMER_SEC]  = ARCH_TIMER_S_EL1_IRQ,
+        };
+        int timer;
 
-        /* Map the virt timer to PPI 27 */
-        qdev_connect_gpio_out(cpudev, GTIMER_VIRT,
-                              qdev_get_gpio_in(vms->gic,
-                                               arm_gic_ppi_index(i, 27)));
+        for (timer = 0; timer < ARRAY_SIZE(timer_irq); timer++) {
+            qdev_connect_gpio_out(cpudev, timer,
+                                  qdev_get_gpio_in(vms->gic,
+                                      arm_gic_ppi_index(i, timer_irq[timer])));
+        }
+
+        qdev_connect_gpio_out_named(cpudev, "gicv3-maintenance-interrupt", 0,
+                                    qdev_get_gpio_in(vms->gic,
+                                        arm_gic_ppi_index(i,
+                                            ARCH_GIC_MAINT_IRQ)));
+        qdev_connect_gpio_out_named(cpudev, "pmu-interrupt", 0,
+                                    qdev_get_gpio_in(vms->gic,
+                                        arm_gic_ppi_index(i,
+                                            VIRTUAL_PMU_IRQ)));
+
+        if (kvm_enabled()) {
+            kvm_arm_pmu_set_irq(ARM_CPU(qemu_get_cpu(i)), VIRTUAL_PMU_IRQ);
+            kvm_arm_pmu_init(ARM_CPU(qemu_get_cpu(i)));
+        }
 
         /* Map the GIC IRQ and FIQ lines to CPU */
         sysbus_connect_irq(gicbusdev, i, qdev_get_gpio_in(cpudev, ARM_CPU_IRQ));
@@ -514,6 +553,17 @@ static void mach_vmapple_init(MachineState *machine)
         }
         object_property_set_int(cpu, "psci-conduit", QEMU_PSCI_CONDUIT_HVC,
                                 &error_fatal);
+
+        /*
+         * Ventura's ApplePSCI driver accepts PSCI through version 1.1 and
+         * refuses to attach when newer Linux KVM hosts expose PSCI 1.2/1.3.
+         * HVF and TCG already implement 1.1, so pin the KVM guest ABI to the
+         * same version before KVM_ARM_VCPU_INIT.
+         */
+        if (kvm_enabled()) {
+            object_property_set_str(cpu, "kvm-psci-version", "1.1",
+                                    &error_fatal);
+        }
 
         /* Secondary CPUs start in PSCI powered-down state */
         if (n > 0) {

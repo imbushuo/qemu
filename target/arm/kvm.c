@@ -610,6 +610,26 @@ int kvm_arch_init(MachineState *ms, KVMState *s)
 
     cap_has_mp_state = kvm_check_extension(s, KVM_CAP_MP_STATE);
 
+    if (g_getenv("QEMU_VMAPPLE_KVM_HVC")) {
+        struct kvm_smccc_filter filter = {
+            .base = 0xc1000000,
+            .nr_functions = 0x100,
+            .action = KVM_SMCCC_FILTER_FWD_TO_USER,
+        };
+        struct kvm_device_attr attr = {
+            .group = KVM_ARM_VM_SMCCC_CTRL,
+            .attr = KVM_ARM_VM_SMCCC_FILTER,
+            .addr = (uintptr_t)&filter,
+        };
+
+        ret = kvm_vm_ioctl(s, KVM_SET_DEVICE_ATTR, &attr);
+        if (ret < 0) {
+            error_report("failed to forward VMApple CPU HVCs: %s",
+                         strerror(-ret));
+            return ret;
+        }
+    }
+
     /* Check whether user space can specify guest syndrome value */
     cap_has_inject_serror_esr =
         kvm_check_extension(s, KVM_CAP_ARM_INJECT_SERROR_ESR);
@@ -622,6 +642,7 @@ int kvm_arch_init(MachineState *ms, KVMState *s)
     }
 
     if (kvm_check_extension(s, KVM_CAP_ARM_NISV_TO_USER)) {
+        warn_report("Host supports KVM_CAP_ARM_NISV_TO_USER, enabling it \n");
         if (kvm_vm_enable_cap(s, KVM_CAP_ARM_NISV_TO_USER, 0)) {
             error_report("Failed to enable KVM_CAP_ARM_NISV_TO_USER cap");
         } else {
@@ -1544,12 +1565,187 @@ static bool kvm_arm_handle_debug(ARMCPU *cpu,
     return false;
 }
 
+#define AARCH64_CORE_REG(x)   (KVM_REG_ARM64 | KVM_REG_SIZE_U64 | \
+                 KVM_REG_ARM_CORE | KVM_REG_ARM_CORE_REG(x))
+
+#define VMAPPLE_DEFAULT_B_KEY    0xfeedfacefeedfacfULL
+#define VMAPPLE_DEFAULT_EL0_KEY  (VMAPPLE_DEFAULT_B_KEY + 4)
+#define VMAPPLE_DEFAULT_A_KEY    (VMAPPLE_DEFAULT_B_KEY + 6)
+#define VMAPPLE_DEFAULT_G_KEY    (VMAPPLE_DEFAULT_B_KEY + 10)
+#define VMAPPLE_APCTL_EL12       ARM64_SYS_REG(3, 6, 15, 15, 0)
+#define VMAPPLE_KERNKEYLO_EL12   ARM64_SYS_REG(3, 6, 15, 2, 3)
+#define VMAPPLE_KERNKEYHI_EL12   ARM64_SYS_REG(3, 6, 15, 2, 4)
+
+static int kvm_arm_set_vmapple_key(CPUState *cs, uint64_t input,
+                                   const uint64_t *regs, size_t count)
+{
+    size_t i;
+    int ret;
+
+    for (i = 0; i < count; i++) {
+        uint64_t value = input + i;
+
+        ret = kvm_set_one_reg(cs, regs[i], &value);
+        if (ret) {
+            return ret;
+        }
+    }
+
+    return 0;
+}
+
+static int kvm_arm_set_vmapple_a_keys(CPUState *cs, uint64_t input)
+{
+    static const uint64_t regs[] = {
+        ARM64_SYS_REG(3, 0, 2, 1, 0), /* APIAKEYLO_EL1 */
+        ARM64_SYS_REG(3, 0, 2, 1, 1), /* APIAKEYHI_EL1 */
+        ARM64_SYS_REG(3, 0, 2, 2, 0), /* APDAKEYLO_EL1 */
+        ARM64_SYS_REG(3, 0, 2, 2, 1), /* APDAKEYHI_EL1 */
+    };
+
+    return kvm_arm_set_vmapple_key(cs, input, regs, ARRAY_SIZE(regs));
+}
+
+static int kvm_arm_set_vmapple_b_keys(CPUState *cs, uint64_t input)
+{
+    static const uint64_t regs[] = {
+        ARM64_SYS_REG(3, 0, 2, 1, 2), /* APIBKEYLO_EL1 */
+        ARM64_SYS_REG(3, 0, 2, 1, 3), /* APIBKEYHI_EL1 */
+        ARM64_SYS_REG(3, 0, 2, 2, 2), /* APDBKEYLO_EL1 */
+        ARM64_SYS_REG(3, 0, 2, 2, 3), /* APDBKEYHI_EL1 */
+    };
+
+    return kvm_arm_set_vmapple_key(cs, input, regs, ARRAY_SIZE(regs));
+}
+
+static int kvm_arm_set_vmapple_g_key(CPUState *cs, uint64_t input)
+{
+    static const uint64_t regs[] = {
+        ARM64_SYS_REG(3, 0, 2, 3, 0), /* APGAKEYLO_EL1 */
+        ARM64_SYS_REG(3, 0, 2, 3, 1), /* APGAKEYHI_EL1 */
+    };
+
+    return kvm_arm_set_vmapple_key(cs, input, regs, ARRAY_SIZE(regs));
+}
+
+static int kvm_arm_set_vmapple_el0_key(CPUState *cs, uint64_t input)
+{
+    static const uint64_t regs[] = {
+        VMAPPLE_KERNKEYLO_EL12,
+        VMAPPLE_KERNKEYHI_EL12,
+    };
+
+    return kvm_arm_set_vmapple_key(cs, input, regs, ARRAY_SIZE(regs));
+}
+
+static int kvm_arm_set_vmapple_apctl(CPUState *cs, bool el0_at_el1)
+{
+    uint64_t value = 0x19 | (el0_at_el1 ? 0x2 : 0);
+
+    return kvm_set_one_reg(cs, VMAPPLE_APCTL_EL12, &value);
+}
+
 int kvm_arch_handle_exit(CPUState *cs, struct kvm_run *run)
 {
     ARMCPU *cpu = ARM_CPU(cs);
     int ret = 0;
 
     switch (run->exit_reason) {
+    case KVM_EXIT_HYPERCALL:
+        if (g_getenv("QEMU_VMAPPLE_KVM_HVC") &&
+            run->hypercall.nr >= 0xc1000000 &&
+            run->hypercall.nr < 0xc1000100) {
+            static unsigned int vmapple_hvc_count[256];
+            uint64_t args[4];
+            unsigned int function = run->hypercall.nr & 0xff;
+            int i;
+
+            for (i = 0; i < ARRAY_SIZE(args); i++) {
+                ret = kvm_get_one_reg(
+                    cs, AARCH64_CORE_REG(regs.regs[i + 1]), &args[i]);
+                if (ret) {
+                    error_report("failed to read VMApple HVC x%d: %s",
+                                 i + 1, strerror(-ret));
+                    return ret;
+                }
+            }
+
+            if (vmapple_hvc_count[function]++ < 20) {
+                warn_report("Invalid VMApple HVC %#" PRIx64
+                            " x1=%#" PRIx64 " x2=%#" PRIx64
+                            " x3=%#" PRIx64,
+                            (uint64_t)run->hypercall.nr,
+                            args[0], args[1], args[2]);
+            }
+
+            if (function == 0) {
+                ret = kvm_arm_set_vmapple_apctl(cs, false);
+                ret = 0;
+                if (!ret) {
+                    ret = kvm_arm_set_vmapple_b_keys(cs,
+                                                     VMAPPLE_DEFAULT_B_KEY);
+                }
+                if (!ret) {
+                    ret = kvm_arm_set_vmapple_el0_key(
+                        cs, VMAPPLE_DEFAULT_EL0_KEY);
+                    ret = 0;
+                }
+                if (!ret) {
+                    ret = kvm_arm_set_vmapple_a_keys(cs,
+                                                     VMAPPLE_DEFAULT_A_KEY);
+                }
+                if (!ret) {
+                    ret = kvm_arm_set_vmapple_g_key(cs,
+                                                    VMAPPLE_DEFAULT_G_KEY);
+                }
+            }
+
+            if (function == 1) {
+                static const uint64_t defaults[] = {
+                    VMAPPLE_DEFAULT_A_KEY,
+                    VMAPPLE_DEFAULT_B_KEY,
+                    VMAPPLE_DEFAULT_EL0_KEY,
+                    VMAPPLE_DEFAULT_G_KEY,
+                };
+
+                for (i = 0; i < ARRAY_SIZE(defaults); i++) {
+                    uint64_t value = defaults[i];
+
+                    ret = kvm_set_one_reg(
+                        cs, AARCH64_CORE_REG(regs.regs[i + 1]), &value);
+                    if (ret && i != 2) {
+                        break;
+                    }
+                }
+            } else if (function == 2) {
+                ret = kvm_arm_set_vmapple_a_keys(cs, args[0]);
+            } else if (function == 3) {
+                ret = kvm_arm_set_vmapple_b_keys(cs, args[0]);
+            } else if (function == 4) {
+                ret = kvm_arm_set_vmapple_el0_key(cs, args[0]);
+                ret = 0;
+            } else if (function == 5) {
+                ret = kvm_arm_set_vmapple_el0_key(cs, args[1]);
+                ret = 0;
+                if (!ret) {
+                    ret = kvm_arm_set_vmapple_apctl(cs, args[0] != 0);
+                    ret = 0;
+                }
+            } else if (function == 6) {
+                ret = kvm_arm_set_vmapple_g_key(cs, args[0]);
+            }
+
+            if (ret) {
+                error_report("failed to service VMApple PAC HVC %#x: %s",
+                             function, strerror(-ret));
+                return ret;
+            }
+            run->hypercall.ret = 0;
+            break;
+        }
+        qemu_log_mask(LOG_UNIMP, "%s: unhandled hypercall %#" PRIx64 "\n",
+                      __func__, (uint64_t)run->hypercall.nr);
+        break;
     case KVM_EXIT_DEBUG:
         if (kvm_arm_handle_debug(cpu, &run->debug.arch)) {
             ret = EXCP_DEBUG;
@@ -1557,6 +1753,8 @@ int kvm_arch_handle_exit(CPUState *cs, struct kvm_run *run)
         break;
     case KVM_EXIT_ARM_NISV:
         /* External DABT with no valid iss to decode */
+        qemu_log_mask(LOG_UNIMP, "%s: Handle KVM exist ARM NISV 0x%lx 0x%lx \n",
+                      __func__, (uint64_t) run->arm_nisv.esr_iss, (uint64_t) run->arm_nisv.fault_ipa);
         ret = kvm_arm_handle_dabt_nisv(cpu, run->arm_nisv.esr_iss,
                                        run->arm_nisv.fault_ipa);
         break;
@@ -2082,9 +2280,6 @@ static void kvm_inject_arm_sea(CPUState *c)
 
     arm_cpu_do_interrupt(c);
 }
-
-#define AARCH64_CORE_REG(x)   (KVM_REG_ARM64 | KVM_REG_SIZE_U64 | \
-                 KVM_REG_ARM_CORE | KVM_REG_ARM_CORE_REG(x))
 
 #define AARCH64_SIMD_CORE_REG(x)   (KVM_REG_ARM64 | KVM_REG_SIZE_U128 | \
                  KVM_REG_ARM_CORE | KVM_REG_ARM_CORE_REG(x))

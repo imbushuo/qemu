@@ -30,6 +30,7 @@
 #include "hw/core/cpu.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/irq.h"
+#include "hw/vmapple/vmapple.h"
 #include "qom/object.h"
 #include "system/address-spaces.h"
 #include "system/hw_accel.h"
@@ -171,26 +172,8 @@ static int reims_vgpu_mmio_window_main_loop(void)
  */
 static int reims_vgpu_mmio_read_xreg(void *ctx, uint32_t index, uint64_t *out)
 {
-#if defined(CONFIG_DARWIN)
-    CPUState *cs = current_cpu;
-    ARMCPU *cpu;
-
-    if (!out || index >= 32) {
-        return -1;
-    }
-    if (!cs) {
-        return -1;
-    }
-    cpu_synchronize_state(cs);
-    cpu = ARM_CPU(cs);
-    *out = cpu->env.xregs[index];
-    return 0;
-#else
     (void)ctx;
-    (void)index;
-    (void)out;
-    return -1;
-#endif
+    return vmapple_read_current_xreg(index, out) ? 0 : -1;
 }
 
 /*
@@ -210,8 +193,11 @@ static int reims_vgpu_mmio_read_xreg(void *ctx, uint32_t index, uint64_t *out)
  * bought nothing and every fragmented map leaked a VA reservation until
  * teardown. `map_pages_stable` is 0 accordingly.
  *
- * Non-Darwin hosts: fail closed (no mach_vm); type-11 writeback uses GPA
- * copies through HostOps until a Linux aliasing path lands.
+ * Linux cannot manufacture a packed view for fragmented pages without
+ * file-backed guest RAM, but QEMU's ordinary RAMBlock mapping is already a
+ * stable alias.  Accept runs that are contiguous in both guest-physical and
+ * host-virtual space (including every valid one-page request) and fail closed
+ * only for fragmented runs.
  */
 static int reims_vgpu_mmio_map_pages(void *ctx, const uint64_t *gpas,
                                   size_t count, void **out_ptr)
@@ -298,10 +284,46 @@ fail:
     g_free(hvas);
     return -1;
 #else
-    (void)ctx;
-    (void)gpas;
-    (void)count;
-    (void)out_ptr;
+    const hwaddr page = REIMS_VGPU_GUEST_PAGE_SIZE_ARM64E;
+    uint8_t *base = NULL;
+    MemoryRegion *base_mr = NULL;
+    size_t i;
+
+    if (!ctx || !gpas || count == 0 || !out_ptr ||
+        count > SIZE_MAX / page) {
+        return -1;
+    }
+
+    rcu_read_lock();
+    for (i = 0; i < count; i++) {
+        hwaddr xlat, plen = page;
+        MemoryRegion *mr;
+        uint8_t *hva;
+
+        mr = address_space_translate(&address_space_memory, gpas[i],
+                                     &xlat, &plen, true,
+                                     MEMTXATTRS_UNSPECIFIED);
+        if (!mr || !memory_region_is_ram(mr) || plen < page) {
+            goto linux_fail;
+        }
+        hva = (uint8_t *)memory_region_get_ram_ptr(mr) + xlat;
+        if (i == 0) {
+            base = hva;
+            base_mr = mr;
+            if (((uintptr_t)base & (page - 1)) != 0) {
+                goto linux_fail;
+            }
+        } else if (mr != base_mr || hva != base + i * page) {
+            goto linux_fail;
+        }
+    }
+    rcu_read_unlock();
+
+    *out_ptr = base;
+    return 0;
+
+linux_fail:
+    rcu_read_unlock();
     return -1;
 #endif
 }
@@ -983,16 +1005,19 @@ static void reims_vgpu_mmio_realize(DeviceState *dev, Error **errp)
         .guest_ram_regions = reims_vgpu_shim_guest_ram_regions,
         .is_ram_gpa = reims_vgpu_shim_is_ram_gpa,
         /*
-         * 0: a fragmented list gets a packed mach_vm_remap view whose lifetime
-         * the caller owns and ends through unmap_pages. Only a pointer that
-         * needs no release at all may claim 1, and this shim cannot promise
-         * that without knowing the run was host-contiguous.
+         * Darwin can return transient packed mach_vm_remap views. Linux only
+         * accepts direct RAMBlock aliases, which remain valid for the VM
+         * lifetime and require no unmap.
          *
          * The GPU rail does not read this and must not: it imports the spans
          * guest_ram_regions names, which are RAMBlock mappings this shim never
          * built and never releases.
          */
+#if defined(CONFIG_DARWIN)
         .map_pages_stable = 0,
+#else
+        .map_pages_stable = 1,
+#endif
         .track_guest_writes = reims_vgpu_mmio_track_guest_writes,
         .untrack_guest_writes = reims_vgpu_mmio_untrack_guest_writes,
         .guest_write_gen = reims_vgpu_mmio_guest_write_gen,
