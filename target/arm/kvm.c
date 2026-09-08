@@ -1715,7 +1715,6 @@ int kvm_arch_handle_exit(CPUState *cs, struct kvm_run *run)
         if (g_getenv("QEMU_VMAPPLE_KVM_HVC") &&
             run->hypercall.nr >= 0xc1000000 &&
             run->hypercall.nr < 0xc1000100) {
-            static unsigned int vmapple_hvc_count[256];
             uint64_t args[4];
             unsigned int function = run->hypercall.nr & 0xff;
             int i;
@@ -1728,14 +1727,6 @@ int kvm_arch_handle_exit(CPUState *cs, struct kvm_run *run)
                                  i + 1, strerror(-ret));
                     return ret;
                 }
-            }
-
-            if (vmapple_hvc_count[function]++ < 20) {
-                warn_report("Invalid VMApple HVC %#" PRIx64
-                            " x1=%#" PRIx64 " x2=%#" PRIx64
-                            " x3=%#" PRIx64,
-                            (uint64_t)run->hypercall.nr,
-                            args[0], args[1], args[2]);
             }
 
             if (function == 0) {
