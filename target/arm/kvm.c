@@ -1448,6 +1448,54 @@ static void kvm_arm_vm_state_change(void *opaque, bool running, RunState state)
     }
 }
 
+/* Returns 1 if emulated, 0 if unsupported, or a negative error code. */
+static int kvm_arm_emulate_isv0_mmio(ARMCPU *cpu, uint64_t fault_ipa)
+{
+    CPUState *cs = CPU(cpu);
+    Error *local_err = NULL;
+    uint32_t insn;
+    bool handled;
+    int ret;
+
+    BQL_LOCK_GUARD();
+
+    if (!cs->vcpu_dirty) {
+        ret = kvm_arch_get_registers(cs, &local_err);
+        if (ret) {
+            goto sync_error;
+        }
+        cs->vcpu_dirty = true;
+    }
+
+    handled = arm_emulate_isv0_mmio(cs, fault_ipa, &insn);
+    if (!handled) {
+        qemu_log_mask(LOG_UNIMP, "KVM: unhandled ISV=0 MMIO: pc=0x%" PRIx64
+                      " insn=0x%08x ipa=0x%" PRIx64 "\n",
+                      cpu->env.pc, insn, fault_ipa);
+    }
+
+    /*
+     * Even a failed decode synchronizes CPU state. Flush it before the
+     * fallback injects an abort in KVM, or the next KVM_RUN would overwrite
+     * the exception state with our pre-injection register snapshot.
+     */
+    ret = kvm_arch_put_registers(cs, KVM_PUT_RUNTIME_STATE, &local_err);
+    if (ret) {
+        goto sync_error;
+    }
+    cs->vcpu_dirty = false;
+
+    return handled;
+
+sync_error:
+    if (local_err) {
+        error_reportf_err(local_err, "Failed to synchronize KVM MMIO state: ");
+    } else {
+        error_report("Failed to synchronize KVM MMIO state: %s", strerror(-ret));
+    }
+    return ret;
+}
+
 /**
  * kvm_arm_handle_dabt_nisv:
  * @cpu: ARMCPU
@@ -1455,12 +1503,25 @@ static void kvm_arm_vm_state_change(void *opaque, bool running, RunState state)
  *           ISV bit set to '0b0' -> no valid instruction syndrome
  * @fault_ipa: faulting address for the synchronous data abort
  *
- * Returns: 0 if the exception has been handled, < 0 otherwise
+ * Returns: 0 if handled, EXCP_DEBUG after single-step emulation, < 0 on error
  */
 static int kvm_arm_handle_dabt_nisv(ARMCPU *cpu, uint64_t esr_iss,
                                     uint64_t fault_ipa)
 {
     CPUARMState *env = &cpu->env;
+    int ret;
+
+    if (!FIELD_EX32(esr_iss, DABORT_ISS, S1PTW) &&
+        !FIELD_EX32(esr_iss, DABORT_ISS, CM)) {
+        ret = kvm_arm_emulate_isv0_mmio(cpu, fault_ipa);
+        if (ret < 0) {
+            return ret;
+        }
+        if (ret) {
+            return CPU(cpu)->singlestep_enabled ? EXCP_DEBUG : 0;
+        }
+    }
+
     /*
      * Request KVM to inject the external data abort into the guest
      */
@@ -1469,9 +1530,8 @@ static int kvm_arm_handle_dabt_nisv(ARMCPU *cpu, uint64_t esr_iss,
         /*
          * The external data abort event will be handled immediately by KVM
          * using the address fault that triggered the exit on given VCPU.
-         * Requesting injection of the external data abort does not rely
-         * on any other VCPU state. Therefore, in this particular case, the VCPU
-         * synchronization can be exceptionally skipped.
+         * Requesting injection does not require another VCPU synchronization.
+         * Any state read for MMIO emulation has already been written back.
          */
         events.exception.ext_dabt_pending = 1;
         /* KVM_CAP_ARM_INJECT_EXT_DABT implies KVM_CAP_VCPU_EVENTS */
@@ -1755,8 +1815,18 @@ int kvm_arch_handle_exit(CPUState *cs, struct kvm_run *run)
         /* External DABT with no valid iss to decode */
         qemu_log_mask(LOG_UNIMP, "%s: Handle KVM exist ARM NISV 0x%lx 0x%lx \n",
                       __func__, (uint64_t) run->arm_nisv.esr_iss, (uint64_t) run->arm_nisv.fault_ipa);
+        /*
+         * The VGIC register API requires every vCPU to be out of KVM_RUN.
+         * Leave the execution region before waiting for exclusive access,
+         * without holding the BQL. Keep the entire instruction exclusive,
+         * including paired accesses and exception injection on failure.
+         */
+        cpu_exec_end(cs);
+        start_exclusive();
         ret = kvm_arm_handle_dabt_nisv(cpu, run->arm_nisv.esr_iss,
                                        run->arm_nisv.fault_ipa);
+        end_exclusive();
+        cpu_exec_start(cs);
         break;
     default:
         qemu_log_mask(LOG_UNIMP, "%s: un-handled exit reason %d\n",

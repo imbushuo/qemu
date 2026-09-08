@@ -1971,6 +1971,13 @@ CPUWatchpoint *find_hw_watchpoint(CPUState *cpu, vaddr addr);
 int insert_hw_watchpoint(vaddr addr, vaddr len, int type);
 int delete_hw_watchpoint(vaddr addr, vaddr len, int type);
 
+/*
+ * Emulate a little-endian A64 MMIO access without instruction syndrome.
+ * The caller must hold the BQL. On success, registers and PC are updated in
+ * CPUARMState; the accelerator must write them back before resuming.
+ */
+bool arm_emulate_isv0_mmio(CPUState *cpu, hwaddr ipa, uint32_t *insn_out);
+
 /* Return the current value of the system counter in ticks */
 uint64_t gt_get_countervalue(CPUARMState *env);
 /*

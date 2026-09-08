@@ -21,6 +21,7 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
+#include "hw/core/cpu.h"
 #include "hw/intc/arm_gicv3_common.h"
 #include "hw/arm/virt.h"
 #include "qemu/error-report.h"
@@ -117,6 +118,181 @@ static inline void kvm_gic_line_level_access(GICv3State *s, int irq, int cpu,
                        KVM_DEV_ARM_VGIC_LINE_LEVEL_INFO_SHIFT),
                       val, write, &error_abort);
 }
+
+/*
+ * Slow-path MMIO for instructions which KVM cannot decode. These callbacks
+ * are only usable while the ARM NISV handler has quiesced all vCPUs.
+ */
+static bool kvm_gic_mmio_accepts(GICv3State *s, int group, uint64_t attr,
+                                unsigned size, bool write)
+{
+    uint32_t offset = attr;
+    bool redist = group == KVM_DEV_ARM_VGIC_GRP_REDIST_REGS;
+    uint32_t priority = redist ? GICR_IPRIORITYR : GICD_IPRIORITYR;
+    uint32_t priority_end = priority + (redist ? GIC_INTERNAL : s->num_irq);
+    uint32_t pending = redist ? GICR_ISPENDR0 : GICD_ISPENDR;
+    uint32_t clear_pending = redist ? GICR_ICPENDR0 : GICD_ICPENDR;
+    uint32_t pending_size = redist ? 4 : 0x80;
+    uint32_t active = redist ? GICR_ISACTIVER0 : GICD_ISACTIVER;
+    uint32_t clear_active = redist ? GICR_ICACTIVER0 : GICD_ICACTIVER;
+
+    if (!current_cpu || !cpu_in_exclusive_context(current_cpu)) {
+        return false;
+    }
+    if ((size != 1 && size != 4) || (offset & (size - 1))) {
+        return false;
+    }
+    if (size == 1 && (offset < priority || offset >= priority_end)) {
+        return false;
+    }
+
+    /*
+     * The migration API exposes pending latches rather than guest-visible
+     * state, and ignores ICPENDR writes. Do not silently change semantics.
+     */
+    if ((offset >= pending && offset < pending + pending_size) ||
+        (offset >= clear_pending &&
+         offset < clear_pending + pending_size)) {
+        return false;
+    }
+    /* Userspace active-state writes ignore hardware-backed interrupts. */
+    if (write && ((offset >= active && offset < active + pending_size) ||
+                  (offset >= clear_active &&
+                   offset < clear_active + pending_size))) {
+        return false;
+    }
+
+    return kvm_device_check_attr(s->dev_fd, group, attr & ~UINT64_C(3));
+}
+
+static MemTxResult kvm_gic_mmio_access(GICv3State *s, int group, uint64_t attr,
+                                      uint64_t *data, unsigned size, bool write)
+{
+    Error *local_err = NULL;
+    uint32_t offset = attr;
+    uint32_t value = *data;
+    unsigned shift = (offset & 3) * 8;
+    bool status = offset == (group == KVM_DEV_ARM_VGIC_GRP_REDIST_REGS ?
+                             GICR_STATUSR : GICD_STATUSR);
+    int ret;
+
+    assert(current_cpu && cpu_in_exclusive_context(current_cpu));
+    attr &= ~UINT64_C(3);
+
+    if (write && (size == 1 || status)) {
+        ret = kvm_device_access(s->dev_fd, group, attr, &value, false,
+                                &local_err);
+        if (ret) {
+            goto fail;
+        }
+        if (status) {
+            /* The migration API replaces STATUSR instead of clearing bits. */
+            value &= ~(uint32_t)*data;
+        } else {
+            value = deposit32(value, shift, 8, *data);
+        }
+    }
+
+    ret = kvm_device_access(s->dev_fd, group, attr, &value, write, &local_err);
+    if (ret) {
+        goto fail;
+    }
+    if (!write) {
+        *data = size == 1 ? extract32(value, shift, 8) : value;
+    }
+    return MEMTX_OK;
+
+fail:
+    error_reportf_err(local_err, "KVM VGIC MMIO access failed: ");
+    return MEMTX_ERROR;
+}
+
+static uint64_t kvm_gicr_mmio_attr(GICv3RedistRegion *region, hwaddr offset)
+{
+    GICv3State *s = region->gic;
+    unsigned cpu = region->cpuidx + offset / gicv3_redist_size(s);
+
+    return KVM_VGIC_ATTR(offset % gicv3_redist_size(s), s->cpu[cpu].gicr_typer);
+}
+
+static bool kvm_gicd_mmio_accepts(void *opaque, hwaddr offset, unsigned size,
+                                 bool write, MemTxAttrs attrs)
+{
+    return kvm_gic_mmio_accepts(opaque, KVM_DEV_ARM_VGIC_GRP_DIST_REGS,
+                                offset, size, write);
+}
+
+static bool kvm_gicr_mmio_accepts(void *opaque, hwaddr offset, unsigned size,
+                                 bool write, MemTxAttrs attrs)
+{
+    GICv3RedistRegion *region = opaque;
+
+    return kvm_gic_mmio_accepts(region->gic, KVM_DEV_ARM_VGIC_GRP_REDIST_REGS,
+                                kvm_gicr_mmio_attr(region, offset), size, write);
+}
+
+static MemTxResult kvm_gicd_mmio_read(void *opaque, hwaddr offset,
+                                     uint64_t *data, unsigned size,
+                                     MemTxAttrs attrs)
+{
+    *data = 0;
+    return kvm_gic_mmio_access(opaque, KVM_DEV_ARM_VGIC_GRP_DIST_REGS,
+                               offset, data, size, false);
+}
+
+static MemTxResult kvm_gicd_mmio_write(void *opaque, hwaddr offset,
+                                      uint64_t data, unsigned size,
+                                      MemTxAttrs attrs)
+{
+    return kvm_gic_mmio_access(opaque, KVM_DEV_ARM_VGIC_GRP_DIST_REGS,
+                               offset, &data, size, true);
+}
+
+static MemTxResult kvm_gicr_mmio_read(void *opaque, hwaddr offset,
+                                     uint64_t *data, unsigned size,
+                                     MemTxAttrs attrs)
+{
+    GICv3RedistRegion *region = opaque;
+
+    *data = 0;
+    return kvm_gic_mmio_access(region->gic, KVM_DEV_ARM_VGIC_GRP_REDIST_REGS,
+                               kvm_gicr_mmio_attr(region, offset), data,
+                               size, false);
+}
+
+static MemTxResult kvm_gicr_mmio_write(void *opaque, hwaddr offset,
+                                      uint64_t data, unsigned size,
+                                      MemTxAttrs attrs)
+{
+    GICv3RedistRegion *region = opaque;
+
+    return kvm_gic_mmio_access(region->gic, KVM_DEV_ARM_VGIC_GRP_REDIST_REGS,
+                               kvm_gicr_mmio_attr(region, offset), &data,
+                               size, true);
+}
+
+static const MemoryRegionOps kvm_gic_mmio_ops[] = {
+    {
+        .read_with_attrs = kvm_gicd_mmio_read,
+        .write_with_attrs = kvm_gicd_mmio_write,
+        .endianness = DEVICE_LITTLE_ENDIAN,
+        .valid.min_access_size = 1,
+        .valid.max_access_size = 4,
+        .valid.accepts = kvm_gicd_mmio_accepts,
+        .impl.min_access_size = 1,
+        .impl.max_access_size = 4,
+    },
+    {
+        .read_with_attrs = kvm_gicr_mmio_read,
+        .write_with_attrs = kvm_gicr_mmio_write,
+        .endianness = DEVICE_LITTLE_ENDIAN,
+        .valid.min_access_size = 1,
+        .valid.max_access_size = 4,
+        .valid.accepts = kvm_gicr_mmio_accepts,
+        .impl.min_access_size = 1,
+        .impl.max_access_size = 4,
+    },
+};
 
 /* Loop through each distributor IRQ related register; since bits
  * corresponding to SPIs and PPIs are RAZ/WI when affinity routing
@@ -819,7 +995,7 @@ static void kvm_arm_gicv3_realize(DeviceState *dev, Error **errp)
         return;
     }
 
-    gicv3_init_irqs_and_mmio(s, kvm_arm_gicv3_set_irq, NULL);
+    gicv3_init_irqs_and_mmio(s, kvm_arm_gicv3_set_irq, kvm_gic_mmio_ops);
 
     for (i = 0; i < s->num_cpu; i++) {
         ARMCPU *cpu = ARM_CPU(qemu_get_cpu(i));
