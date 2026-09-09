@@ -115,7 +115,7 @@ static void vmapple_cfg_realize(DeviceState *dev, Error **errp)
         s->model = g_strdup("VM0001");
     }
     if (!s->soc_name) {
-        s->soc_name = g_strdup("Apple M1 (Virtual)");
+        s->soc_name = g_strdup("Apple Virtual");
     }
 
     set_fixlen_property_or_return(s->cfg.serial, s->serial, errp, "serial");

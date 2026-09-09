@@ -63,3 +63,18 @@ to get better interactive access into the target system:
        -netdev user,id=net0,ipv6=off,hostfwd=tcp::2222-:22,hostfwd=tcp::5901-:5900 \
        -device virtio-net-pci,netdev=net0
 
+Tracing KVM pointer authentication calls
+---------------------------------------
+
+Apple pointer authentication HVCs forwarded to QEMU by KVM can be traced by
+adding the following option to the QEMU command line::
+
+  -trace 'enable=kvm_arm_vmapple_pauth_hvc*'
+
+These events are disabled by default. They record the vCPU index, HVC number,
+input registers x1-x4, and handler completion status (zero or a negative host
+error code). If reading an input register fails, only the completion event is
+emitted. Enabling tracing does not itself enable HVC forwarding.
+
+The input registers can contain pointer authentication key material, so treat
+the trace output as sensitive.

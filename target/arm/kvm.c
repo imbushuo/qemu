@@ -1712,8 +1712,7 @@ int kvm_arch_handle_exit(CPUState *cs, struct kvm_run *run)
 
     switch (run->exit_reason) {
     case KVM_EXIT_HYPERCALL:
-        if (g_getenv("QEMU_VMAPPLE_KVM_HVC") &&
-            run->hypercall.nr >= 0xc1000000 &&
+        if (run->hypercall.nr >= 0xc1000000 &&
             run->hypercall.nr < 0xc1000100) {
             uint64_t args[4];
             unsigned int function = run->hypercall.nr & 0xff;
@@ -1723,11 +1722,17 @@ int kvm_arch_handle_exit(CPUState *cs, struct kvm_run *run)
                 ret = kvm_get_one_reg(
                     cs, AARCH64_CORE_REG(regs.regs[i + 1]), &args[i]);
                 if (ret) {
+                    trace_kvm_arm_vmapple_pauth_hvc_ret(
+                        cs->cpu_index, run->hypercall.nr, ret);
                     error_report("failed to read VMApple HVC x%d: %s",
                                  i + 1, strerror(-ret));
                     return ret;
                 }
             }
+
+            trace_kvm_arm_vmapple_pauth_hvc(
+                cs->cpu_index, run->hypercall.nr,
+                args[0], args[1], args[2], args[3]);
 
             if (function == 0) {
                 ret = kvm_arm_set_vmapple_apctl(cs, false);
@@ -1786,6 +1791,8 @@ int kvm_arch_handle_exit(CPUState *cs, struct kvm_run *run)
                 ret = kvm_arm_set_vmapple_g_key(cs, args[0]);
             }
 
+            trace_kvm_arm_vmapple_pauth_hvc_ret(
+                cs->cpu_index, run->hypercall.nr, ret);
             if (ret) {
                 error_report("failed to service VMApple PAC HVC %#x: %s",
                              function, strerror(-ret));
