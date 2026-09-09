@@ -1791,6 +1791,13 @@ int kvm_arch_handle_exit(CPUState *cs, struct kvm_run *run)
                 ret = kvm_arm_set_vmapple_g_key(cs, args[0]);
             }
 
+            if (!ret) {
+                uint64_t status = 0;
+
+                /* ARM64 KVM ignores hypercall.ret; return through guest x0. */
+                ret = kvm_set_one_reg(
+                    cs, AARCH64_CORE_REG(regs.regs[0]), &status);
+            }
             trace_kvm_arm_vmapple_pauth_hvc_ret(
                 cs->cpu_index, run->hypercall.nr, ret);
             if (ret) {
@@ -1798,7 +1805,6 @@ int kvm_arch_handle_exit(CPUState *cs, struct kvm_run *run)
                              function, strerror(-ret));
                 return ret;
             }
-            run->hypercall.ret = 0;
             break;
         }
         qemu_log_mask(LOG_UNIMP, "%s: unhandled hypercall %#" PRIx64 "\n",
