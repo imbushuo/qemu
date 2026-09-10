@@ -101,6 +101,7 @@ if config_all_devices.has_key('CONFIG_REIMS_VGPU')
       reims_vgpu_link_args = [
         '-framework', 'Metal',
         '-framework', 'Foundation',
+        '-framework', 'IOSurface',
         '-framework', 'QuartzCore',
         '-framework', 'CoreGraphics',
         '-lobjc',
