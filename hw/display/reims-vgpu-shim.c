@@ -22,6 +22,20 @@ uint64_t reims_vgpu_shim_mono_ns(void *ctx)
     return (uint64_t)qemu_clock_get_ns(QEMU_CLOCK_HOST);
 }
 
+int reims_vgpu_shim_map_pages_failed(ReimsVgpuMapPagesFailure *failure,
+                                     uint32_t stage, int32_t host_errno,
+                                     uint64_t page_index)
+{
+    if (failure) {
+        *failure = (ReimsVgpuMapPagesFailure) {
+            .stage = stage,
+            .host_errno = host_errno,
+            .page_index = page_index,
+        };
+    }
+    return -1;
+}
+
 /*
  * RAM-only attrs. `memory = 1` makes the address space reject a translation
  * that resolves to a device rather than RAM (MEMTX_ACCESS_ERROR) instead of

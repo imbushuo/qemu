@@ -48,6 +48,11 @@ int reims_vgpu_shim_write_gpa(void *ctx, uint64_t gpa, const uint8_t *buf,
 /* 1 = guest RAM, 0 = not (MMIO / ROM / unmapped). Mapper page-entry accept. */
 int reims_vgpu_shim_is_ram_gpa(void *ctx, uint64_t gpa);
 
+/* Fill the ABI failure detail and return the map_pages refusal code. */
+int reims_vgpu_shim_map_pages_failed(ReimsVgpuMapPagesFailure *failure,
+                                     uint32_t stage, int32_t host_errno,
+                                     uint64_t page_index);
+
 /*
  * Where guest RAM lives in this process, as stable (gpa_base, host_va, len)
  * spans. See the ReimsVgpuHostOps.guest_ram_regions comment in

@@ -140,7 +140,7 @@ static int reims_vgpu_pci_read_xreg(void *ctx, uint32_t index, uint64_t *out)
 }
 
 static int reims_vgpu_pci_map_pages(void *ctx, const uint64_t *gpas, size_t count,
-                             void **out_ptr)
+                             void **out_ptr, ReimsVgpuMapPagesFailure *failure)
 {
     ReimsVGPUPCIState *s = ctx;
     /* x86 guest page granularity (host-pointer import view stride). */
@@ -150,7 +150,8 @@ static int reims_vgpu_pci_map_pages(void *ctx, const uint64_t *gpas, size_t coun
     size_t i;
 
     if (!s || !gpas || count == 0 || !out_ptr || count > SIZE_MAX / page) {
-        return -1;
+        return reims_vgpu_shim_map_pages_failed(
+            failure, REIMS_VGPU_MAP_PAGES_FAILURE_NONE, EINVAL, 0);
     }
 
     /*
@@ -248,9 +249,12 @@ fail:
         uint8_t *view = mmap(NULL, total, PROT_NONE,
                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         ReimsVGPUPCIPageView held;
+        uint32_t failure_stage = REIMS_VGPU_MAP_PAGES_FAILURE_INVALID_GUEST_PAGE;
+        int failure_errno = 0;
 
         if (view == MAP_FAILED) {
-            return -1;
+            return reims_vgpu_shim_map_pages_failed(
+                failure, REIMS_VGPU_MAP_PAGES_FAILURE_RESERVATION, errno, 0);
         }
         rcu_read_lock();
         for (i = 0; i < count; i++) {
@@ -272,19 +276,27 @@ fail:
             hva = (uint8_t *)memory_region_get_ram_ptr(mr) + xlat;
             rb = qemu_ram_block_from_host(hva, false, &rb_offset);
             if (!rb || !qemu_ram_is_shared(rb)) {
+                failure_stage = REIMS_VGPU_MAP_PAGES_FAILURE_ALIAS;
+                failure_errno = ENOTSUP;
                 goto alias_fail_locked;
             }
             fd = qemu_ram_get_fd(rb);
             if (fd < 0 || rb_offset > RAM_ADDR_MAX - qemu_ram_get_fd_offset(rb)) {
+                failure_stage = REIMS_VGPU_MAP_PAGES_FAILURE_ALIAS;
+                failure_errno = fd < 0 ? ENOTSUP : EOVERFLOW;
                 goto alias_fail_locked;
             }
             fd_offset = qemu_ram_get_fd_offset(rb) + rb_offset;
             if ((fd_offset & (page - 1)) != 0) {
+                failure_stage = REIMS_VGPU_MAP_PAGES_FAILURE_ALIAS;
+                failure_errno = EINVAL;
                 goto alias_fail_locked;
             }
             mapped = mmap(view + i * page, page, PROT_READ | PROT_WRITE,
                           MAP_SHARED | MAP_FIXED, fd, fd_offset);
             if (mapped == MAP_FAILED) {
+                failure_stage = REIMS_VGPU_MAP_PAGES_FAILURE_ALIAS;
+                failure_errno = errno;
                 goto alias_fail_locked;
             }
         }
@@ -299,7 +311,8 @@ fail:
 alias_fail_locked:
         rcu_read_unlock();
         munmap(view, total);
-        return -1;
+        return reims_vgpu_shim_map_pages_failed(
+            failure, failure_stage, failure_errno, i);
     }
 }
 
