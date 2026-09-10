@@ -124,7 +124,7 @@ static void test_vmapple_hvc_return(void)
     qtest_quit(qts);
 }
 
-static void test_vmapple_timer(void)
+static void test_vmapple_timer(const void *opaque)
 {
     static const uint32_t timer_code[] = {
         0xd53be000, /* mrs x0, cntfrq_el0 */
@@ -137,6 +137,9 @@ static void test_vmapple_timer(void)
         0xd503207f, /* wait: wfi */
         0x17ffffff, /* b wait */
     };
+    const char *set_aidr = opaque;
+    g_autofree char *old_set_aidr = g_strdup(g_getenv("XNU_SET_AIDR"));
+    uint64_t expected_agt = set_aidr && set_aidr[0] ? 1ULL << 32 : 0;
     QTestState *qts;
 
     if (!host_supports_test(true)) {
@@ -145,9 +148,19 @@ static void test_vmapple_timer(void)
         return;
     }
 
+    if (set_aidr) {
+        g_setenv("XNU_SET_AIDR", set_aidr, true);
+    } else {
+        g_unsetenv("XNU_SET_AIDR");
+    }
     qts = qtest_init("-machine virt,gic-version=3 -accel kvm -cpu host "
                      "-m 64M -nodefaults -S "
                      "-device loader,addr=0x40010000,cpu-num=0");
+    if (old_set_aidr) {
+        g_setenv("XNU_SET_AIDR", old_set_aidr, true);
+    } else {
+        g_unsetenv("XNU_SET_AIDR");
+    }
     for (int round = 0; round < 2; round++) {
         int64_t deadline;
         uint64_t cntfrq;
@@ -169,7 +182,7 @@ static void test_vmapple_timer(void)
             break;
         }
         g_assert_cmphex(qtest_readq(qts, RESULT_BASE + 8) & (1ULL << 32),
-                        ==, 1ULL << 32);
+                        ==, expected_agt);
         if (round == 0) {
             qtest_qmp_assert_success(qts, "{ 'execute': 'system_reset' }");
             qtest_qmp_eventwait(qts, "RESET");
@@ -183,7 +196,14 @@ int main(int argc, char **argv)
     g_test_init(&argc, &argv, NULL);
     if (qtest_has_machine("virt") && qtest_has_accel("kvm")) {
         qtest_add_func("/arm/kvm/vmapple-hvc-return", test_vmapple_hvc_return);
-        qtest_add_func("/arm/kvm/vmapple-timer", test_vmapple_timer);
+        qtest_add_data_func("/arm/kvm/vmapple-timer/unset", NULL,
+                           test_vmapple_timer);
+        qtest_add_data_func("/arm/kvm/vmapple-timer/empty", "",
+                           test_vmapple_timer);
+        qtest_add_data_func("/arm/kvm/vmapple-timer/enabled", "1",
+                           test_vmapple_timer);
+        qtest_add_data_func("/arm/kvm/vmapple-timer/zero", "0",
+                           test_vmapple_timer);
     }
     return g_test_run();
 }

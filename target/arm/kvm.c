@@ -2239,6 +2239,7 @@ static int kvm_arm_sve_set_vls(ARMCPU *cpu)
 
 static void kvm_arm_init_apple_agt(CPUState *cs)
 {
+    const char *set_aidr = g_getenv("XNU_SET_AIDR");
     uint64_t cntfrq, aidr;
     int ret;
 
@@ -2250,6 +2251,14 @@ static void kvm_arm_init_apple_agt(CPUState *cs)
                         "frequency for XNU; system behavior could be wrong",
                         cntfrq);
         }
+        return;
+    }
+
+    if (!set_aidr || !set_aidr[0]) {
+        warn_report("CNTFRQ_EL0 is %" PRIu64 " Hz but XNU_SET_AIDR is unset "
+                    "or empty; leaving AIDR_EL1 unchanged. Set XNU_SET_AIDR "
+                    "to a nonempty value to report timer behavior to XNU; "
+                    "system behavior might be unexpected", cntfrq);
         return;
     }
 
