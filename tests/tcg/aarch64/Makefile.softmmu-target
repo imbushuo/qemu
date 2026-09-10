@@ -90,6 +90,24 @@ run-memory-replay: memory-replay run-memory-record
 
 EXTRA_RUNS+=run-memory-replay
 
+mdscr: $(AARCH64_SYSTEM_SRC)/mdscr.S $(LINK_SCRIPT)
+	$(CC) -nostdlib -static -ggdb -Wl,-T$(LINK_SCRIPT) $< -o $@
+
+CLEANFILES += mdscr
+
+ifneq ($(GDB),)
+run-gdbstub-mdscr: mdscr
+	$(call run-test, $@, $(GDB_SCRIPT) \
+		--output run-gdbstub-mdscr.out \
+		--gdb $(GDB) \
+		--qemu $(QEMU) --qargs "-chardev null$(COMMA)id=output $(QEMU_OPTS)" \
+		--bin $< --test $(AARCH64_SRC)/gdbstub/test-mdscr.py, \
+	MDSCR_EL1 with hardware breakpoints)
+
+EXTRA_RUNS += run-gdbstub-mdscr
+EXTRA_TESTS += mdscr
+endif
+
 ifneq ($(CROSS_CC_HAS_ARMV8_3),)
 pauth-3: CFLAGS += $(CROSS_CC_HAS_ARMV8_3)
 # This test explicitly checks the output of the pauth operation so we

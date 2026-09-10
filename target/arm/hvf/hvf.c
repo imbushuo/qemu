@@ -1319,6 +1319,7 @@ static bool hvf_arm_el2_supported(void)
     return is_nested_virt_supported;
 }
 
+hv_return_t _hv_vm_config_set_isa(hv_vm_config_t cfg, int isa);
 
 hv_return_t hvf_arch_vm_create(MachineState *ms, uint32_t pa_range)
 {
@@ -1330,6 +1331,13 @@ hv_return_t hvf_arch_vm_create(MachineState *ms, uint32_t pa_range)
         goto cleanup;
     }
     chosen_ipa_bit_size = pa_range;
+
+    warn_report("Setting up Apple private ISA");
+    ret = _hv_vm_config_set_isa(config, 3);
+    if (ret != HV_SUCCESS) {
+        error_report("error setting private ISA");
+        goto cleanup;
+    }
 
     if (__builtin_available(macOS 15.0, *)) {
         if (hvf_nested_virt_enabled()) {
@@ -1774,6 +1782,9 @@ static int hvf_sysreg_read(CPUState *cpu, uint32_t reg, uint64_t *val)
         return 0;
     case SYSREG_OSDLR_EL1:
         /* Dummy register */
+        return 0;
+    case SYSREG_MDSCR_EL1:
+        *val = env->cp15.mdscr_el1;
         return 0;
     case SYSREG_CNTHCTL_EL2:
         if (__builtin_available(macOS 15.0, *)) {

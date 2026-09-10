@@ -24,3 +24,6 @@ GTAGS
 # LLVM coverage artifacts (see scripts/runtime-dead in the parent repo).
 *.profraw
 *.profdata
+
+build-vulkan
+.DS_Store
