@@ -51,6 +51,7 @@ const KVMCapabilityInfo kvm_arch_required_capabilities[] = {
 static bool cap_has_mp_state;
 static bool cap_has_inject_serror_esr;
 static bool cap_has_inject_ext_dabt;
+static bool cap_has_writable_imp_id_regs;
 
 /**
  * ARMHostCPUFeatures: information about the host CPU (identified
@@ -639,6 +640,17 @@ int kvm_arch_init(MachineState *ms, KVMState *s)
         error_report("Using more than 256 vcpus requires a host kernel "
                      "with KVM_CAP_ARM_IRQ_LINE_LAYOUT_2");
         ret = -EINVAL;
+    }
+
+    if (kvm_check_extension(s, KVM_CAP_ARM_WRITABLE_IMP_ID_REGS)) {
+        warn_report("Host supports KVM_CAP_ARM_WRITABLE_IMP_ID_REGS, enabling it \n");
+        if (kvm_vm_enable_cap(s, KVM_CAP_ARM_WRITABLE_IMP_ID_REGS, 0)) {
+            error_report("Failed to enable KVM_CAP_ARM_WRITABLE_IMP_ID_REGS cap");
+        } else {
+            /* Set status for supporting the impl ID regs overwrite */
+            cap_has_writable_imp_id_regs = kvm_check_extension(s,
+                                    KVM_CAP_ARM_WRITABLE_IMP_ID_REGS);
+        }
     }
 
     if (kvm_check_extension(s, KVM_CAP_ARM_NISV_TO_USER)) {
@@ -2222,6 +2234,48 @@ static int kvm_arm_sve_set_vls(ARMCPU *cpu)
 }
 
 #define ARM_CPU_ID_MPIDR       3, 0, 0, 0, 5
+#define ARM64_REG_AIDR_EL1      ARM64_SYS_REG(3, 1, 0, 0, 7)
+#define AIDR_AGT               (1ULL << 32)
+
+static void kvm_arm_init_apple_agt(CPUState *cs)
+{
+    uint64_t cntfrq, aidr;
+    int ret;
+
+    asm volatile("mrs %0, cntfrq_el0" : "=r"(cntfrq));
+
+    if (cntfrq < 900000000ULL) {
+        if (cntfrq != 24000000ULL) {
+            warn_report("CNTFRQ_EL0 is %" PRIu64 " Hz, a nonstandard timer "
+                        "frequency for XNU; system behavior could be wrong",
+                        cntfrq);
+        }
+        return;
+    }
+
+    if (!cap_has_writable_imp_id_regs) {
+        warn_report("CNTFRQ_EL0 is %" PRIu64 " Hz but writable implementation "
+                    "ID registers are unavailable; unable to report timer "
+                    "behavior to XNU, system behavior might be unexpected",
+                    cntfrq);
+        return;
+    }
+
+    ret = kvm_get_one_reg(cs, ARM64_REG_AIDR_EL1, &aidr);
+    if (!ret) {
+        aidr |= AIDR_AGT;
+        ret = kvm_set_one_reg(cs, ARM64_REG_AIDR_EL1, &aidr);
+    }
+    if (ret) {
+        warn_report("Unable to enable the Apple AGT bit in AIDR_EL1: %s; "
+                    "unable to report timer behavior to XNU, "
+                    "system behavior might be unexpected", strerror(-ret));
+        return;
+    }
+
+    info_report("Enabled the Apple AGT bit in AIDR_EL1 for CNTFRQ_EL0 = "
+                "%" PRIu64 " Hz", cntfrq);
+}
 
 int kvm_arch_pre_create_vcpu(CPUState *cpu, Error **errp)
 {
@@ -2323,6 +2377,8 @@ int kvm_arch_init_vcpu(CPUState *cs)
         return ret;
     }
     cpu->mp_affinity = mpidr & ARM64_AFFINITY_MASK;
+
+    kvm_arm_init_apple_agt(cs);
 
     return kvm_arm_init_cpreg_list(cpu);
 }
