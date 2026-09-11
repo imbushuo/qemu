@@ -1469,6 +1469,8 @@ static int kvm_arm_emulate_isv0_mmio(ARMCPU *cpu, uint64_t fault_ipa)
     bool handled;
     int ret;
 
+    trace_kvm_arm_emulate_isv0_mmio(cs->cpu_index, fault_ipa);
+
     BQL_LOCK_GUARD();
 
     if (!cs->vcpu_dirty) {
