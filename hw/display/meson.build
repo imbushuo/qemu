@@ -171,7 +171,7 @@ if config_all_devices.has_key('CONFIG_REIMS_VGPU')
     compile_args: ['-I' + reims_vgpu_abi_header_dir])
   system_ss.add(when: 'CONFIG_REIMS_VGPU',
     if_true: [files('reims-vgpu-mmio.c', 'reims-vgpu-pci.c', 'reims-vgpu-dirty.c',
-                    'reims-vgpu-shim.c'), reims_vgpu_dep])
+                    'reims-vgpu-shim.c', 'reims-vgpu-worker.c'), reims_vgpu_dep])
 endif
 
 if config_all_devices.has_key('CONFIG_VIRTIO_GPU')

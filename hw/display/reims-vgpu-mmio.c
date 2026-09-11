@@ -10,7 +10,8 @@
  * ParavirtualizedGraphics.framework:
  *   - SysBus registration + MemoryRegionOps
  *   - HostOps callbacks (GPA/KVA R/W, xreg, clock, schedule BH)
- *   - oneshot BH: drain Rust + apply HostActions (IRQ / scanout / cursor)
+ *   - ordered worker: drain Rust without the BQL
+ *   - main-loop BH: apply HostActions (IRQ / scanout / cursor)
  *   - GraphicHwOps console surface (mode + update_full); pixels from Rust
  *
  * Protocol, FIFO, decode, mapper capture, and GPU work all live in Rust.
@@ -35,6 +36,7 @@
 #include "system/address-spaces.h"
 #include "system/hw_accel.h"
 #include "system/memory.h"
+#include "system/runstate-action.h"
 #include "system/runstate.h"
 #include "ui/console.h"
 #include "ui/surface.h"
@@ -42,6 +44,7 @@
 #include "reims_vgpu_qemu_abi.h"
 #include "reims-vgpu-dirty.h"
 #include "reims-vgpu-shim.h"
+#include "reims-vgpu-worker.h"
 
 /*
  * Guest X-regs and mach_vm page aliasing are Darwin product paths (arm guest
@@ -112,6 +115,10 @@ struct ReimsVGPUMMIOState {
     ReimsVgpuDirty *dirty;
     /* Opaque handle from reims_vgpu_qemu_device_create; 0 when unrealized. */
     uint64_t rust_handle;
+    ReimsVgpuWorker drain_worker;
+    QEMUBH *action_bh;
+    Notifier shutdown_notifier;
+    bool shutdown_notifier_registered;
     /*
      * Live packed mach_vm_remap views, so unmap_pages can tell one of ours
      * from a direct RAMBlock HVA — the two are indistinguishable as bare
@@ -454,22 +461,19 @@ static void reims_vgpu_mmio_schedule_bh(void *ctx)
 {
     ReimsVGPUMMIOState *s = ctx;
 
-    /*
-     * Same pattern as apple-gfx raiseInterrupt: oneshot BH on the main AIO
-     * context. Safe if called while already on the BQL (MMIO path).
-     *
-     * Archive also pumps aio_poll after schedule so drain runs under the
-     * guest GPU spinlock. Product drains synchronously inside Rust MMIO
-     * (current_cpu for KVA); the BH only delivers residual work + actions.
-     */
-    aio_bh_schedule_oneshot(qemu_get_aio_context(), reims_vgpu_mmio_bh, s);
+    reims_vgpu_worker_schedule(&s->drain_worker);
 }
 
-/*
- * Pop HostActions produced by a prior drain (sync MMIO or BH). Archive paints
- * scanout inside stamp flush; product enqueues ScanoutUpdate — deliver here so
- * logo pixels hit the console without waiting on an idle main loop.
- */
+static void reims_vgpu_mmio_notify_actions(void *ctx)
+{
+    ReimsVGPUMMIOState *s = ctx;
+
+    if (s->action_bh) {
+        qemu_bh_schedule(s->action_bh);
+    }
+}
+
+/* IRQs can be delivered while the worker is still draining other packets. */
 static void reims_vgpu_mmio_deliver_actions(ReimsVGPUMMIOState *s)
 {
     ReimsVgpuHostAction action;
@@ -695,20 +699,25 @@ static void reims_vgpu_mmio_apply_action(ReimsVGPUMMIOState *s,
 static void reims_vgpu_mmio_bh(void *opaque)
 {
     ReimsVGPUMMIOState *s = opaque;
-    int rc;
 
     if (s->rust_handle == 0) {
         return;
     }
+    reims_vgpu_mmio_deliver_actions(s);
+}
 
+static void reims_vgpu_mmio_drain(void *opaque)
+{
+    ReimsVGPUMMIOState *s = opaque;
+    int rc;
+
+    assert(!bql_locked());
     rc = reims_vgpu_qemu_device_drain(s->rust_handle);
     if (rc != REIMS_VGPU_QEMU_OK) {
-        qemu_log_mask(LOG_GUEST_ERROR, "%s: drain failed rc=%d\n",
+        qemu_log_mask(LOG_GUEST_ERROR, "%s: worker drain failed rc=%d\n",
                       TYPE_REIMS_VGPU_MMIO, rc);
-        return;
     }
-
-    reims_vgpu_mmio_deliver_actions(s);
+    qemu_bh_schedule(s->action_bh);
 }
 
 static void reims_vgpu_mmio_poll_tick(void *opaque)
@@ -857,7 +866,7 @@ static void reims_vgpu_mmio_gfx_write(void *opaque, hwaddr offset, uint64_t data
                       TYPE_REIMS_VGPU_MMIO, offset, data, size);
         return;
     }
-    /* Drain may have enqueued scanout/IRQ under the doorbell MMIO path. */
+    /* Apply prompt actions without waiting for the GPU worker. */
     reims_vgpu_mmio_deliver_actions(s);
 }
 
@@ -941,6 +950,39 @@ static const MemoryRegionOps reims_vgpu_mmio_iosfc_ops = {
 
 /* ---------- Lifecycle ---------- */
 
+static void reims_vgpu_mmio_stop_backend(ReimsVGPUMMIOState *s)
+{
+    if (s->poll_timer) {
+        timer_del(s->poll_timer);
+        timer_free(s->poll_timer);
+        s->poll_timer = NULL;
+    }
+    reims_vgpu_worker_stop(&s->drain_worker);
+    if (s->rust_handle != 0) {
+        reims_vgpu_qemu_window_stop(s->rust_handle);
+        reims_vgpu_qemu_device_destroy(s->rust_handle);
+        s->rust_handle = 0;
+    }
+    /* Keep the notification target alive until every producer has stopped. */
+    if (s->action_bh) {
+        qemu_bh_delete(s->action_bh);
+        s->action_bh = NULL;
+    }
+}
+
+static void reims_vgpu_mmio_shutdown_notifier(Notifier *n, void *data)
+{
+    ReimsVGPUMMIOState *s = container_of(n, ReimsVGPUMMIOState,
+                                       shutdown_notifier);
+
+    (void)data;
+    /* A shutdown pause keeps the device alive for system_reset and cont. */
+    if (shutdown_action == SHUTDOWN_ACTION_PAUSE) {
+        return;
+    }
+    reims_vgpu_mmio_stop_backend(s);
+}
+
 static void reims_vgpu_mmio_init(Object *obj)
 {
     ReimsVGPUMMIOState *s = REIMS_VGPU_MMIO(obj);
@@ -1017,6 +1059,7 @@ static void reims_vgpu_mmio_realize(DeviceState *dev, Error **errp)
          */
         .guest_ram_regions = reims_vgpu_shim_guest_ram_regions,
         .is_ram_gpa = reims_vgpu_shim_is_ram_gpa,
+        .notify_actions = reims_vgpu_mmio_notify_actions,
         /*
          * Darwin can return transient packed mach_vm_remap views. Linux only
          * accepts direct RAMBlock aliases, which remain valid for the VM
@@ -1037,6 +1080,8 @@ static void reims_vgpu_mmio_realize(DeviceState *dev, Error **errp)
         .guest_written_pages = reims_vgpu_mmio_guest_written_pages,
     };
     s->dirty = reims_vgpu_dirty_new();
+    reims_vgpu_worker_init(&s->drain_worker, reims_vgpu_mmio_drain, s);
+    s->action_bh = aio_bh_new(qemu_get_aio_context(), reims_vgpu_mmio_bh, s);
 
     info = (ReimsVgpuQemuCreateInfo){
         .abi_version = REIMS_VGPU_QEMU_ABI_VERSION,
@@ -1050,9 +1095,18 @@ static void reims_vgpu_mmio_realize(DeviceState *dev, Error **errp)
     if (rc != REIMS_VGPU_QEMU_OK || out.handle == 0) {
         error_setg(errp, "%s: reims_vgpu_qemu_device_create failed (rc=%d)",
                    TYPE_REIMS_VGPU_MMIO, rc);
+        qemu_bh_delete(s->action_bh);
+        s->action_bh = NULL;
+        reims_vgpu_worker_destroy(&s->drain_worker);
+        reims_vgpu_dirty_free(s->dirty);
+        s->dirty = NULL;
         return;
     }
     s->rust_handle = out.handle;
+    reims_vgpu_worker_start(&s->drain_worker, "reims-vgpu-mmio-drain");
+    s->shutdown_notifier.notify = reims_vgpu_mmio_shutdown_notifier;
+    qemu_register_shutdown_notifier(&s->shutdown_notifier);
+    s->shutdown_notifier_registered = true;
 
     /*
      * Console only at realize (apple-gfx / archive apple-pv-gpu). Surface size
@@ -1097,16 +1151,11 @@ static void reims_vgpu_mmio_unrealize(DeviceState *dev)
 {
     ReimsVGPUMMIOState *s = REIMS_VGPU_MMIO(dev);
 
-    if (s->poll_timer) {
-        timer_del(s->poll_timer);
-        timer_free(s->poll_timer);
-        s->poll_timer = NULL;
+    if (s->shutdown_notifier_registered) {
+        notifier_remove(&s->shutdown_notifier);
+        s->shutdown_notifier_registered = false;
     }
-    if (s->rust_handle != 0) {
-        reims_vgpu_qemu_window_stop(s->rust_handle);
-        reims_vgpu_qemu_device_destroy(s->rust_handle);
-        s->rust_handle = 0;
-    }
+    reims_vgpu_mmio_stop_backend(s);
 #if defined(CONFIG_DARWIN)
     if (reims_vgpu_mmio_window_owner == s) {
         reims_vgpu_mmio_window_owner = NULL;
@@ -1118,6 +1167,7 @@ static void reims_vgpu_mmio_unrealize(DeviceState *dev)
     s->dirty = NULL;
     reims_vgpu_mmio_free_page_views(s);
     g_clear_pointer(&s->page_views, g_array_unref);
+    reims_vgpu_worker_destroy(&s->drain_worker);
     if (s->con) {
         qemu_console_set_surface(s->con, NULL);
     }
@@ -1127,10 +1177,23 @@ static void reims_vgpu_mmio_unrealize(DeviceState *dev)
 static void reims_vgpu_mmio_reset(DeviceState *dev)
 {
     ReimsVGPUMMIOState *s = REIMS_VGPU_MMIO(dev);
+    int rc;
 
+    reims_vgpu_worker_pause(&s->drain_worker);
     if (s->rust_handle != 0) {
-        reims_vgpu_qemu_device_reset(s->rust_handle);
+        rc = reims_vgpu_qemu_device_reset(s->rust_handle);
+        if (rc != REIMS_VGPU_QEMU_OK) {
+            qemu_log_mask(LOG_GUEST_ERROR, "%s: reset failed rc=%d\n",
+                          TYPE_REIMS_VGPU_MMIO, rc);
+            reims_vgpu_worker_resume(&s->drain_worker);
+            reims_vgpu_worker_schedule(&s->drain_worker);
+            return;
+        }
     }
+    if (s->action_bh) {
+        qemu_bh_cancel(s->action_bh);
+    }
+    /* No worker may access packed aliases between reset and their release. */
     reims_vgpu_mmio_free_page_views(s);
     /* Edge-triggered completion IRQs; leave lines deasserted at reset. */
     qemu_set_irq(s->irq_gfx, 0);
@@ -1148,6 +1211,7 @@ static void reims_vgpu_mmio_reset(DeviceState *dev)
         qemu_console_update_full(s->con);
         s->new_frame_ready = false;
     }
+    reims_vgpu_worker_resume(&s->drain_worker);
 }
 
 static void reims_vgpu_mmio_class_init(ObjectClass *klass, const void *data)

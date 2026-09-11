@@ -27,6 +27,7 @@
 #include "system/address-spaces.h"
 #include "system/memory.h"
 #include "system/ramblock.h"
+#include "system/runstate-action.h"
 #include "system/runstate.h"
 #include "ui/console.h"
 #include "ui/surface.h"
@@ -34,6 +35,7 @@
 #include "reims_vgpu_qemu_abi.h"
 #include "reims-vgpu-dirty.h"
 #include "reims-vgpu-shim.h"
+#include "reims-vgpu-worker.h"
 
 #define TYPE_REIMS_VGPU_PCI "reims-vgpu-pci"
 OBJECT_DECLARE_SIMPLE_TYPE(ReimsVGPUPCIState, REIMS_VGPU_PCI)
@@ -107,9 +109,7 @@ struct ReimsVGPUPCIState {
 
     /* Ordered Rust FIFO/render drain owner. The AIO BH only applies completed
      * HostActions; it never translates shaders or waits for GPU work. */
-    QemuThread drain_thread;
-    QemuMutex drain_mutex;
-    QemuCond drain_cond;
+    ReimsVgpuWorker drain_worker;
     QEMUBH *action_bh;
     /*
      * Steady vblank + Dekker-rescue heartbeat. Keep its wait on a dedicated
@@ -119,9 +119,6 @@ struct ReimsVGPUPCIState {
     QemuThread heartbeat_thread;
     QemuMutex heartbeat_mutex;
     QemuCond heartbeat_cond;
-    bool drain_pending;
-    bool drain_stopping;
-    bool drain_started;
     bool heartbeat_stopping;
     bool heartbeat_started;
     Notifier shutdown_notifier;
@@ -371,10 +368,7 @@ static void reims_vgpu_pci_schedule_bh(void *ctx)
 {
     ReimsVGPUPCIState *s = ctx;
 
-    qemu_mutex_lock(&s->drain_mutex);
-    s->drain_pending = true;
-    qemu_cond_signal(&s->drain_cond);
-    qemu_mutex_unlock(&s->drain_mutex);
+    reims_vgpu_worker_schedule(&s->drain_worker);
 }
 
 /*
@@ -668,32 +662,18 @@ static void reims_vgpu_pci_bh(void *opaque)
     reims_vgpu_pci_deliver_actions(s);
 }
 
-static void *reims_vgpu_pci_drain_thread(void *opaque)
+static void reims_vgpu_pci_drain(void *opaque)
 {
     ReimsVGPUPCIState *s = opaque;
+    int rc;
 
-    for (;;) {
-        int rc;
-
-        qemu_mutex_lock(&s->drain_mutex);
-        while (!s->drain_pending && !s->drain_stopping) {
-            qemu_cond_wait(&s->drain_cond, &s->drain_mutex);
-        }
-        if (s->drain_stopping) {
-            qemu_mutex_unlock(&s->drain_mutex);
-            break;
-        }
-        s->drain_pending = false;
-        qemu_mutex_unlock(&s->drain_mutex);
-
-        rc = reims_vgpu_qemu_device_drain(s->rust_handle);
-        if (rc != REIMS_VGPU_QEMU_OK) {
-            qemu_log_mask(LOG_GUEST_ERROR, "%s: worker drain failed rc=%d\n",
-                          TYPE_REIMS_VGPU_PCI, rc);
-        }
-        qemu_bh_schedule(s->action_bh);
+    assert(!bql_locked());
+    rc = reims_vgpu_qemu_device_drain(s->rust_handle);
+    if (rc != REIMS_VGPU_QEMU_OK) {
+        qemu_log_mask(LOG_GUEST_ERROR, "%s: worker drain failed rc=%d\n",
+                      TYPE_REIMS_VGPU_PCI, rc);
     }
-    return NULL;
+    qemu_bh_schedule(s->action_bh);
 }
 
 /*
@@ -875,18 +855,7 @@ static void reims_vgpu_pci_stop_backend(ReimsVGPUPCIState *s)
         qemu_thread_join(&s->heartbeat_thread);
         s->heartbeat_started = false;
     }
-    if (s->drain_started) {
-        qemu_mutex_lock(&s->drain_mutex);
-        s->drain_stopping = true;
-        qemu_cond_signal(&s->drain_cond);
-        qemu_mutex_unlock(&s->drain_mutex);
-        qemu_thread_join(&s->drain_thread);
-        s->drain_started = false;
-    }
-    if (s->action_bh) {
-        qemu_bh_delete(s->action_bh);
-        s->action_bh = NULL;
-    }
+    reims_vgpu_worker_stop(&s->drain_worker);
     if (s->rust_handle != 0) {
         /*
          * Close + join the host window first (no-op if none): its Vulkan
@@ -898,6 +867,10 @@ static void reims_vgpu_pci_stop_backend(ReimsVGPUPCIState *s)
         reims_vgpu_qemu_device_destroy(s->rust_handle);
         s->rust_handle = 0;
     }
+    if (s->action_bh) {
+        qemu_bh_delete(s->action_bh);
+        s->action_bh = NULL;
+    }
 }
 
 static void reims_vgpu_pci_shutdown_notifier(Notifier *n, void *data)
@@ -906,6 +879,10 @@ static void reims_vgpu_pci_shutdown_notifier(Notifier *n, void *data)
                                          shutdown_notifier);
 
     (void)data;
+    /* A shutdown pause keeps the device alive for system_reset and cont. */
+    if (shutdown_action == SHUTDOWN_ACTION_PAUSE) {
+        return;
+    }
     reims_vgpu_pci_stop_backend(s);
 }
 
@@ -1013,8 +990,7 @@ static void reims_vgpu_pci_realize(PCIDevice *pdev, Error **errp)
     };
     s->dirty = reims_vgpu_dirty_new();
 
-    qemu_mutex_init(&s->drain_mutex);
-    qemu_cond_init(&s->drain_cond);
+    reims_vgpu_worker_init(&s->drain_worker, reims_vgpu_pci_drain, s);
     qemu_mutex_init(&s->heartbeat_mutex);
     qemu_cond_init(&s->heartbeat_cond);
     s->action_bh = aio_bh_new(qemu_get_aio_context(), reims_vgpu_pci_bh, s);
@@ -1036,14 +1012,11 @@ static void reims_vgpu_pci_realize(PCIDevice *pdev, Error **errp)
         s->action_bh = NULL;
         qemu_cond_destroy(&s->heartbeat_cond);
         qemu_mutex_destroy(&s->heartbeat_mutex);
-        qemu_cond_destroy(&s->drain_cond);
-        qemu_mutex_destroy(&s->drain_mutex);
+        reims_vgpu_worker_destroy(&s->drain_worker);
         return;
     }
     s->rust_handle = out.handle;
-    qemu_thread_create(&s->drain_thread, "reims-vgpu-pci-drain",
-                       reims_vgpu_pci_drain_thread, s, QEMU_THREAD_JOINABLE);
-    s->drain_started = true;
+    reims_vgpu_worker_start(&s->drain_worker, "reims-vgpu-pci-drain");
     qemu_thread_create(&s->heartbeat_thread, "reims-vgpu-pci-heartbeat",
                        reims_vgpu_pci_heartbeat_thread, s, QEMU_THREAD_JOINABLE);
     s->heartbeat_started = true;
@@ -1133,8 +1106,7 @@ static void reims_vgpu_pci_exit(PCIDevice *pdev)
     s->dirty = NULL;
     qemu_cond_destroy(&s->heartbeat_cond);
     qemu_mutex_destroy(&s->heartbeat_mutex);
-    qemu_cond_destroy(&s->drain_cond);
-    qemu_mutex_destroy(&s->drain_mutex);
+    reims_vgpu_worker_destroy(&s->drain_worker);
     msi_uninit(pdev);
     if (s->con) {
         qemu_graphic_console_close(s->con);
@@ -1146,13 +1118,22 @@ static void reims_vgpu_pci_exit(PCIDevice *pdev)
 static void reims_vgpu_pci_reset(DeviceState *dev)
 {
     ReimsVGPUPCIState *s = REIMS_VGPU_PCI(dev);
+    int rc;
 
+    reims_vgpu_worker_pause(&s->drain_worker);
     if (s->rust_handle != 0) {
-        reims_vgpu_qemu_device_reset(s->rust_handle);
+        rc = reims_vgpu_qemu_device_reset(s->rust_handle);
+        if (rc != REIMS_VGPU_QEMU_OK) {
+            qemu_log_mask(LOG_GUEST_ERROR, "%s: reset failed rc=%d\n",
+                          TYPE_REIMS_VGPU_PCI, rc);
+            reims_vgpu_worker_resume(&s->drain_worker);
+            reims_vgpu_worker_schedule(&s->drain_worker);
+            return;
+        }
     }
-    qemu_mutex_lock(&s->drain_mutex);
-    s->drain_pending = false;
-    qemu_mutex_unlock(&s->drain_mutex);
+    if (s->action_bh) {
+        qemu_bh_cancel(s->action_bh);
+    }
     s->new_frame_ready = false;
     reims_vgpu_pci_set_mode(s, REIMS_VGPU_EFI_BOOT_WIDTH, REIMS_VGPU_EFI_BOOT_HEIGHT);
     if (s->surface && s->con) {
@@ -1164,6 +1145,7 @@ static void reims_vgpu_pci_reset(DeviceState *dev)
         qemu_console_update_full(s->con);
         s->new_frame_ready = false;
     }
+    reims_vgpu_worker_resume(&s->drain_worker);
 }
 
 static void reims_vgpu_pci_instance_init(Object *obj)

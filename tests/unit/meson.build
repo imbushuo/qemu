@@ -50,6 +50,7 @@ tests = {
   'test-interval-tree': [],
   'test-fifo': [],
   'test-envlist': [],
+  'test-reims-vgpu-worker': ['../../hw/display/reims-vgpu-worker.c'],
 }
 
 if have_system or have_tools
