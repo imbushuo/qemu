@@ -52,6 +52,7 @@ static bool cap_has_mp_state;
 static bool cap_has_inject_serror_esr;
 static bool cap_has_inject_ext_dabt;
 static bool cap_has_writable_imp_id_regs;
+static bool cap_has_apple_hypervisor_functions;
 
 /**
  * ARMHostCPUFeatures: information about the host CPU (identified
@@ -611,7 +612,25 @@ int kvm_arch_init(MachineState *ms, KVMState *s)
 
     cap_has_mp_state = kvm_check_extension(s, KVM_CAP_MP_STATE);
 
-    if (g_getenv("QEMU_VMAPPLE_KVM_HVC")) {
+    cap_has_apple_hypervisor_functions = false;
+    if (kvm_check_extension(s, KVM_CAP_ARM_APPLE_HYPERVISOR_FUNCTIONS) > 0) {
+        int enable_ret = kvm_vm_enable_cap(s,
+                            KVM_CAP_ARM_APPLE_HYPERVISOR_FUNCTIONS, 0);
+
+        if (enable_ret < 0) {
+            warn_report("Failed to enable "
+                        "KVM_CAP_ARM_APPLE_HYPERVISOR_FUNCTIONS: %s; "
+                        "falling back to QEMU emulation",
+                        strerror(-enable_ret));
+        } else {
+            cap_has_apple_hypervisor_functions = true;
+            info_report("Enabled KVM_CAP_ARM_APPLE_HYPERVISOR_FUNCTIONS: "
+                        "Apple HVCs and ISV=0 MMIO are handled by KVM");
+        }
+    }
+
+    if (!cap_has_apple_hypervisor_functions &&
+        g_getenv("QEMU_VMAPPLE_KVM_HVC")) {
         struct kvm_smccc_filter filter = {
             .base = 0xc1000000,
             .nr_functions = 0x100,
@@ -1525,7 +1544,8 @@ static int kvm_arm_handle_dabt_nisv(ARMCPU *cpu, uint64_t esr_iss,
     CPUARMState *env = &cpu->env;
     int ret;
 
-    if (!FIELD_EX32(esr_iss, DABORT_ISS, S1PTW) &&
+    if (!cap_has_apple_hypervisor_functions &&
+        !FIELD_EX32(esr_iss, DABORT_ISS, S1PTW) &&
         !FIELD_EX32(esr_iss, DABORT_ISS, CM)) {
         ret = kvm_arm_emulate_isv0_mmio(cpu, fault_ipa);
         if (ret < 0) {

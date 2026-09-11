@@ -63,6 +63,20 @@ to get better interactive access into the target system:
        -netdev user,id=net0,ipv6=off,hostfwd=tcp::2222-:22,hostfwd=tcp::5901-:5900 \
        -device virtio-net-pci,netdev=net0
 
+KVM Apple hypervisor support
+---------------------------
+
+On Linux hosts with the downstream ``KVM_CAP_ARM_APPLE_HYPERVISOR_FUNCTIONS``
+capability, QEMU automatically attempts to enable in-kernel Apple HVC and
+ISV=0 MMIO handling during ARM KVM initialization. Successful enablement is
+always logged and bypasses both QEMU's Apple HVC forwarding filter (even
+when ``QEMU_VMAPPLE_KVM_HVC`` is set) and its ISV=0 MMIO emulator.
+
+If enablement fails, QEMU logs a warning and retains the existing userspace
+handling. The same fallback applies when the capability is unavailable,
+without a warning: Apple HVC forwarding requires ``QEMU_VMAPPLE_KVM_HVC``
+to be set, while ISV=0 MMIO emulation uses KVM's non-ISV exits as before.
+
 Tracing KVM pointer authentication calls
 ---------------------------------------
 
@@ -75,6 +89,8 @@ These events are disabled by default. They record the vCPU index, HVC number,
 input registers x1-x4, and handler completion status (zero or a negative host
 error code). If reading an input register fails, only the completion event is
 emitted. Enabling tracing does not itself enable HVC forwarding.
+HVCs handled by the in-kernel Apple hypervisor capability do not produce
+these QEMU trace events.
 
 The input registers can contain pointer authentication key material, so treat
 the trace output as sensitive.

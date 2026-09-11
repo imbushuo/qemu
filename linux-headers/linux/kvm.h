@@ -986,6 +986,9 @@ struct kvm_enable_cap {
 #define KVM_CAP_S390_KEYOP 247
 #define KVM_CAP_S390_VSIE_ESAMODE 248
 
+/* Downstream arm64 capability, sharing its number with upstream s390. */
+#define KVM_CAP_ARM_APPLE_HYPERVISOR_FUNCTIONS 248
+
 struct kvm_irq_routing_irqchip {
 	__u32 irqchip;
 	__u32 pin;

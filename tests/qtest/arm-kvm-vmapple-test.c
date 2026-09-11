@@ -35,7 +35,7 @@ static const uint32_t guest_code[] = {
     0x17ffffff, /* b wait */
 };
 
-static bool host_supports_test(bool writable_imp_id_regs)
+static bool host_supports_test(bool writable_imp_id_regs, bool in_kernel_hvc)
 {
 #if defined(CONFIG_LINUX) && defined(__aarch64__)
     struct kvm_create_device dev = {
@@ -45,6 +45,9 @@ static bool host_supports_test(bool writable_imp_id_regs)
     struct kvm_device_attr attr = {
         .group = KVM_ARM_VM_SMCCC_CTRL,
         .attr = KVM_ARM_VM_SMCCC_FILTER,
+    };
+    struct kvm_enable_cap cap = {
+        .cap = KVM_CAP_ARM_APPLE_HYPERVISOR_FUNCTIONS,
     };
     int fd = open("/dev/kvm", O_RDWR);
     int ipa_bits;
@@ -57,7 +60,10 @@ static bool host_supports_test(bool writable_imp_id_regs)
     ipa_bits = ioctl(fd, KVM_CHECK_EXTENSION, KVM_CAP_ARM_VM_IPA_SIZE);
     vm = ioctl(fd, KVM_CREATE_VM, ipa_bits > 0 ? ipa_bits : 0);
     if (vm >= 0) {
-        supported = ioctl(vm, KVM_HAS_DEVICE_ATTR, &attr) == 0 &&
+        supported = (in_kernel_hvc ?
+                     (ioctl(fd, KVM_CHECK_EXTENSION, cap.cap) > 0 &&
+                      ioctl(vm, KVM_ENABLE_CAP, &cap) == 0) :
+                     ioctl(vm, KVM_HAS_DEVICE_ATTR, &attr) == 0) &&
                     ioctl(vm, KVM_CREATE_DEVICE, &dev) == 0 &&
                     (!writable_imp_id_regs ||
                      ioctl(fd, KVM_CHECK_EXTENSION,
@@ -71,7 +77,7 @@ static bool host_supports_test(bool writable_imp_id_regs)
 #endif
 }
 
-static void test_vmapple_hvc_return(void)
+static void test_vmapple_hvc_return(const void *opaque)
 {
     static const uint64_t expected[] = {
         0,
@@ -80,15 +86,20 @@ static void test_vmapple_hvc_return(void)
         0xfeedfacefeedfad3ULL,
         0xfeedfacefeedfad9ULL,
     };
+    bool in_kernel_hvc = GPOINTER_TO_INT(opaque);
     g_autofree char *old_hvc = g_strdup(g_getenv("QEMU_VMAPPLE_KVM_HVC"));
     QTestState *qts;
 
-    if (!host_supports_test(false)) {
-        g_test_skip("KVM ARM userspace hypercalls and VGICv3 are required");
+    if (!host_supports_test(false, in_kernel_hvc)) {
+        g_test_skip("KVM ARM hypercall support and VGICv3 are required");
         return;
     }
 
-    g_setenv("QEMU_VMAPPLE_KVM_HVC", "1", true);
+    if (in_kernel_hvc) {
+        g_unsetenv("QEMU_VMAPPLE_KVM_HVC");
+    } else {
+        g_setenv("QEMU_VMAPPLE_KVM_HVC", "1", true);
+    }
     qts = qtest_init("-machine virt,gic-version=3 -accel kvm -cpu host "
                      "-m 64M -nodefaults -S "
                      "-device loader,addr=0x40010000,cpu-num=0");
@@ -142,7 +153,7 @@ static void test_vmapple_timer(const void *opaque)
     uint64_t expected_agt = set_aidr && set_aidr[0] ? 1ULL << 32 : 0;
     QTestState *qts;
 
-    if (!host_supports_test(true)) {
+    if (!host_supports_test(true, false)) {
         g_test_skip("KVM ARM writable implementation ID registers, "
                     "userspace hypercalls and VGICv3 are required");
         return;
@@ -195,7 +206,10 @@ int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
     if (qtest_has_machine("virt") && qtest_has_accel("kvm")) {
-        qtest_add_func("/arm/kvm/vmapple-hvc-return", test_vmapple_hvc_return);
+        qtest_add_data_func("/arm/kvm/vmapple-hvc-return",
+                           GINT_TO_POINTER(false), test_vmapple_hvc_return);
+        qtest_add_data_func("/arm/kvm/vmapple-hvc-return-in-kernel",
+                           GINT_TO_POINTER(true), test_vmapple_hvc_return);
         qtest_add_data_func("/arm/kvm/vmapple-timer/unset", NULL,
                            test_vmapple_timer);
         qtest_add_data_func("/arm/kvm/vmapple-timer/empty", "",
