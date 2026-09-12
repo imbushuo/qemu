@@ -874,10 +874,16 @@ static uint64_t reims_vgpu_mmio_iosfc_read(void *opaque, hwaddr offset,
                                         unsigned size)
 {
     ReimsVGPUMMIOState *s = opaque;
+    Object *owner = OBJECT(s);
     uint64_t val = 0;
+    bool inherited_bql = bql_locked();
 
+    object_ref(owner);
+    if (!inherited_bql) {
+        bql_lock();
+    }
     if (s->rust_handle == 0) {
-        return 0;
+        goto out;
     }
     if (reims_vgpu_qemu_iosfc_read(s->rust_handle, offset, size, &val) !=
         REIMS_VGPU_QEMU_OK) {
@@ -885,9 +891,14 @@ static uint64_t reims_vgpu_mmio_iosfc_read(void *opaque, hwaddr offset,
                       "%s: iosfc read failed offset=0x%" HWADDR_PRIx
                       " size=%u\n",
                       TYPE_REIMS_VGPU_MMIO, offset, size);
-        return 0;
+        goto out;
     }
     trace_reims_vgpu_mmio_iosfc_read(offset, val);
+out:
+    object_unref(owner);
+    if (!inherited_bql) {
+        bql_unlock();
+    }
     return val;
 }
 
@@ -895,11 +906,29 @@ static void reims_vgpu_mmio_iosfc_write(void *opaque, hwaddr offset, uint64_t da
                                      unsigned size)
 {
     ReimsVGPUMMIOState *s = opaque;
+    Object *owner = OBJECT(s);
+    bool inherited_bql = bql_locked();
+    uint64_t ticket = 0;
+    int rc;
 
+    /*
+     * A reset/unrealize may run during the admission wait. It cancels the
+     * independent Rust ticket without waiting for this vCPU to reacquire BQL.
+     * Keep the QOM allocation, not its backend/HostOps fields, until return.
+     */
+    object_ref(owner);
+    if (!inherited_bql) {
+        bql_lock();
+    }
     if (s->rust_handle == 0) {
-        return;
+        goto out;
     }
     trace_reims_vgpu_mmio_iosfc_write(offset, data);
+    rc = reims_vgpu_qemu_iosfc_begin_write(s->rust_handle, offset, data, size,
+                                          &ticket);
+    if (rc != REIMS_VGPU_QEMU_OK) {
+        goto failed;
+    }
     /*
      * The same reason as the gfx path, and both are needed: this shim exposes
      * two guest-facing register windows, and either can be the write that hands
@@ -909,15 +938,25 @@ static void reims_vgpu_mmio_iosfc_write(void *opaque, hwaddr offset, uint64_t da
      * covering both costs a predicate, not a sync.
      */
     reims_vgpu_dirty_harvest(s->dirty);
-    if (reims_vgpu_qemu_iosfc_write(s->rust_handle, offset, data, size) !=
-        REIMS_VGPU_QEMU_OK) {
+    rc = reims_vgpu_shim_iosfc_complete(ticket);
+    if (rc == REIMS_VGPU_QEMU_CANCELLED) {
+        /* No backend fields or callbacks are valid after cancellation. */
+        goto out;
+    }
+    if (rc != REIMS_VGPU_QEMU_OK) {
+failed:
         qemu_log_mask(LOG_GUEST_ERROR,
                       "%s: iosfc write failed offset=0x%" HWADDR_PRIx
-                      " data=0x%" PRIx64 " size=%u\n",
-                      TYPE_REIMS_VGPU_MMIO, offset, data, size);
-        return;
+                      " data=0x%" PRIx64 " size=%u rc=%d\n",
+                      TYPE_REIMS_VGPU_MMIO, offset, data, size, rc);
+        goto out;
     }
     reims_vgpu_mmio_deliver_actions(s);
+out:
+    object_unref(owner);
+    if (!inherited_bql) {
+        bql_unlock();
+    }
 }
 
 static const MemoryRegionOps reims_vgpu_mmio_gfx_ops = {
@@ -952,6 +991,7 @@ static const MemoryRegionOps reims_vgpu_mmio_iosfc_ops = {
 
 static void reims_vgpu_mmio_stop_backend(ReimsVGPUMMIOState *s)
 {
+    assert(bql_locked());
     if (s->poll_timer) {
         timer_del(s->poll_timer);
         timer_free(s->poll_timer);
@@ -998,6 +1038,12 @@ static void reims_vgpu_mmio_init(Object *obj)
     memory_region_init_io(&s->iomem_iosfc, obj, &reims_vgpu_mmio_iosfc_ops, s,
                           TYPE_REIMS_VGPU_MMIO ".iosfc",
                           REIMS_VGPU_MMIO_IOSFC_MMIO_SIZE);
+    /*
+     * An ordinary callback's device reentrancy guard cannot span a BQL-free
+     * wait. Rust owns ordered admission and actual same-device reentry refusal;
+     * the callback explicitly restores BQL around every HostOps operation.
+     */
+    memory_region_enable_lockless_io(&s->iomem_iosfc);
     sysbus_init_mmio(sbd, &s->iomem_gfx);
     sysbus_init_mmio(sbd, &s->iomem_iosfc);
     sysbus_init_irq(sbd, &s->irq_gfx);
@@ -1179,6 +1225,7 @@ static void reims_vgpu_mmio_reset(DeviceState *dev)
     ReimsVGPUMMIOState *s = REIMS_VGPU_MMIO(dev);
     int rc;
 
+    assert(bql_locked());
     reims_vgpu_worker_pause(&s->drain_worker);
     if (s->rust_handle != 0) {
         rc = reims_vgpu_qemu_device_reset(s->rust_handle);

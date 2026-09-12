@@ -5,6 +5,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/main-loop.h"
 #include "qemu/timer.h"
 #include "hw/core/cpu.h"
 #include "exec/cpu-common.h"
@@ -226,6 +227,31 @@ int reims_vgpu_shim_read_kva(void *ctx, uint64_t kva, uint8_t *buf, size_t len)
     }
     cpu_synchronize_state(cs);
     return cpu_memory_rw_debug(cs, kva, buf, len, false) == 0 ? 0 : -1;
+}
+
+int reims_vgpu_shim_iosfc_complete(uint64_t ticket)
+{
+    int rc;
+
+    assert(bql_locked());
+    for (;;) {
+        rc = reims_vgpu_qemu_iosfc_write(ticket);
+        if (rc != REIMS_VGPU_QEMU_BUSY) {
+            break;
+        }
+        /*
+         * try returned without holding device state or performing HostOps.
+         * Neither the wait nor its cancellation retains HostOps.ctx.
+         */
+        bql_unlock();
+        rc = reims_vgpu_qemu_iosfc_wait(ticket);
+        bql_lock();
+        if (rc != REIMS_VGPU_QEMU_OK) {
+            break;
+        }
+    }
+    reims_vgpu_qemu_iosfc_finish(ticket);
+    return rc;
 }
 
 static InputButton reims_vgpu_shim_button(uint32_t code, bool *ok)

@@ -79,6 +79,14 @@ int reims_vgpu_shim_guest_ram_regions(void *ctx, ReimsVgpuGuestRamRegion *out,
 int reims_vgpu_shim_read_kva(void *ctx, uint64_t kva, uint8_t *buf, size_t len);
 
 /*
+ * Finish an already-begun IOSFC write. Enter/return with BQL held, on the
+ * originating vCPU. Only the pure Rust admission wait runs without BQL.
+ * The caller retains its QOM object, and must not use backend fields after
+ * CANCELLED: teardown may have freed them during the wait.
+ */
+int reims_vgpu_shim_iosfc_complete(uint64_t ticket);
+
+/*
  * May a present naming `mapping_id` paint the host console right now?
  *
  * The verdict comes from Rust whole; this only forwards it, and answers false

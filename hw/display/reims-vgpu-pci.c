@@ -847,6 +847,7 @@ static const MemoryRegionOps reims_vgpu_pci_gfx_ops = {
  */
 static void reims_vgpu_pci_stop_backend(ReimsVGPUPCIState *s)
 {
+    assert(bql_locked());
     if (s->heartbeat_started) {
         qemu_mutex_lock(&s->heartbeat_mutex);
         s->heartbeat_stopping = true;
@@ -1120,6 +1121,7 @@ static void reims_vgpu_pci_reset(DeviceState *dev)
     ReimsVGPUPCIState *s = REIMS_VGPU_PCI(dev);
     int rc;
 
+    assert(bql_locked());
     reims_vgpu_worker_pause(&s->drain_worker);
     if (s->rust_handle != 0) {
         rc = reims_vgpu_qemu_device_reset(s->rust_handle);
